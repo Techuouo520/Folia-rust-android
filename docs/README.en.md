@@ -22,7 +22,7 @@ The Android client of [Folia-rust](https://github.com/Techuouo520/Folia-rust). T
 ---
 
 > [!NOTE]
-> Early stage: only the project skeleton exists so far. Kotlin can already call the Rust core; playback, online platforms and lyric animations are not wired in yet.
+> Local music, the cover wall, NetEase, the equalizer and the notification are wired in. Lyric animations are not. Playback on a device still has to be checked by installing the release APK yourself.
 
 ## About
 
@@ -38,13 +38,15 @@ Folia-rust rewrote Folia from Electron into a native program. Folia-rust-android
 | Feature | Status |
 |---|:---:|
 | Kotlin calls into the Rust core | ✅ |
-| Local music scanning and library | 🚧 |
-| Playback (AAudio output, equalizer) | 🚧 |
-| Background playback, notification, media session | 🚧 |
-| Lyrics with per-word timing | 🚧 |
+| Local music scanning and library | ✅ |
+| Playback, queue and equalizer | ✅ |
+| Background playback, notification, media session | ✅ |
+| Cover-wall home (playlists / radio / explore / albums / local) | ✅ |
+| Lyrics with per-word timing | ✅ |
 | Lyric animation styles | 🚧 |
-| Online platforms: NetEase Cloud Music, KuGou, QQ Music, Bodian, Qishui | 🚧 |
-| Languages: 简体中文, 繁體中文, English, Bahasa Indonesia, Tiếng Việt | 🚧 |
+| Online platform: NetEase Cloud Music | ✅ |
+| Online platforms: KuGou, QQ Music, Bodian, Qishui | 🚧 |
+| Languages: 简体中文, 繁體中文, English, Bahasa Indonesia, Tiếng Việt | ✅ |
 
 > The Android client does not include Spotify.
 
@@ -53,7 +55,7 @@ Folia-rust rewrote Folia from Electron into a native program. Folia-rust-android
 | Layer | Choice |
 |---|---|
 | Screens | Kotlin 2.4 + Jetpack Compose |
-| Bridge | uniffi 0.32 (app API), JNI (hands the `Surface` to wgpu) |
+| Bridge | uniffi 0.32 (app API), JNI (Android context, and later the `Surface` handed to wgpu) |
 | Lyric rendering | wgpu 27 + iced sub-crates, WGSL |
 | Core | Rust 1.99.1, Folia-rust crates |
 | Build | Gradle 9.8 + AGP 9.5, cargo-ndk 4.1.2, NDK 29.0.14206865 |
@@ -78,22 +80,24 @@ Create `local.properties` in the repo root (not tracked by git) with your SDK pa
 sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk
 ```
 
-Then build the debug APK:
+Then build the APKs:
 
 ```bash
 ./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-On Windows use `gradlew.bat assembleDebug`. The APK ends up in `app/build/outputs/apk/debug/app-debug.apk`.
+On Windows use `gradlew.bat`. The debug APK is `app/build/outputs/apk/debug/app-debug.apk` and the release APK is `app/build/outputs/apk/release/app-release.apk`. Release turns on R8 and builds Rust with `--release`. To use a release keystore, set `RELEASE_STORE_FILE`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` in `local.properties`. Without them the APK is signed with the debug key so it can be installed locally. Do not commit the keystore.
 
 ## Roadmap
 
 - [x] Project skeleton: Gradle, Compose, Rust bridge
-- [ ] Local music scanning and playback, background service and notification
-- [ ] Lyrics and lyric animations (`SurfaceView` + wgpu)
-- [ ] Online platforms: search, playback, QR login, playlists
-- [ ] Settings, languages, themes
-- [ ] Release builds and signing
+- [x] Local music scanning and playback, background service and notification
+- [x] Cover wall, NetEase QR login and online playback, equalizer, lyric lines
+- [x] Settings, languages, light and dark theme
+- [x] Release build, R8 and signing
+- [ ] Lyric animations (`SurfaceView` + wgpu)
+- [ ] Screens for the other online platforms
 
 ## Acknowledgements
 

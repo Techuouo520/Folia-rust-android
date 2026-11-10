@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="permission_storage_title">Allow access to music</string>
+    <string name="permission_storage_body">Folia reads the music folder you choose, including lyric files next to the songs. Allow access to all files in system settings.</string>
+    <string name="permission_storage_action">Open settings</string>
+    <string name="permission_storage_legacy_body">Folia reads the music folder you choose, including lyric files next to the songs. Allow storage access.</string>
+    <string name="permission_storage_legacy_action">Allow storage</string>
+    <string name="permission_notification_body">Notifications keep playback controls on the lock screen and in the notification shade.</string>
+    <string name="permission_notification_action">Allow notifications</string>
+    <string name="music_folder_label">Music folder</string>
+    <string name="scan_result">Updated %1$d, removed %2$d, %3$d tracks</string>
+    <string name="scan_failed">Scan failed</string>
+    <string name="focus_denied">Could not get audio focus</string>
+</resources>

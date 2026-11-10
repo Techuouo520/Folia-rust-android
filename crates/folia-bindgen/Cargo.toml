@@ -1,0 +1,15 @@
+# Host tool that writes the Kotlin bindings. It does not link the Android bridge.
+[package]
+name = "folia-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+uniffi = { workspace = true, features = ["cli"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="permission_storage_title">允许访问音乐</string>
+    <string name="permission_storage_body">Folia 会读取你指定的音乐目录，包括歌曲旁边的歌词文件。请在系统设置中允许访问所有文件。</string>
+    <string name="permission_storage_action">打开设置</string>
+    <string name="permission_storage_legacy_body">Folia 会读取你指定的音乐目录，包括歌曲旁边的歌词文件。请允许存储访问。</string>
+    <string name="permission_storage_legacy_action">允许存储</string>
+    <string name="permission_notification_body">通知用于在锁屏和通知栏保留播放控制。</string>
+    <string name="permission_notification_action">允许通知</string>
+    <string name="music_folder_label">音乐目录</string>
+    <string name="scan_result">更新 %1$d 首，移除 %2$d 首，共 %3$d 首</string>
+    <string name="scan_failed">扫描失败</string>
+    <string name="focus_denied">无法获取音频焦点</string>
+</resources>

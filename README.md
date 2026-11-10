@@ -22,7 +22,7 @@
 ---
 
 > [!NOTE]
-> 项目处于早期阶段：目前只有工程骨架，Kotlin 已能调用 Rust 核心，播放、在线平台与歌词动画尚未接入。
+> 本地音乐、封面墙、网易云、均衡器和通知栏已接入。歌词动画尚未接入。真机播放需要自己安装 release APK 后验证。
 
 ## 简介
 
@@ -38,13 +38,15 @@ Folia-rust 把 Folia 从 Electron 重写成了原生程序。Folia-rust-android 
 | 功能 | 状态 |
 |---|:---:|
 | Kotlin 调用 Rust 核心 | ✅ |
-| 本地音乐扫描与资料库 | 🚧 |
-| 播放（AAudio 输出、均衡器） | 🚧 |
-| 后台播放、通知栏、媒体会话 | 🚧 |
-| 歌词显示与逐字时序 | 🚧 |
+| 本地音乐扫描与资料库 | ✅ |
+| 播放、队列与均衡器 | ✅ |
+| 后台播放、通知栏、媒体会话 | ✅ |
+| 封面墙首页（歌单 / 电台 / 探索 / 专辑 / 本地） | ✅ |
+| 歌词显示与逐字时序 | ✅ |
 | 歌词动画样式 | 🚧 |
-| 在线平台：网易云、酷狗、QQ 音乐、波点、汽水 | 🚧 |
-| 多语言：简体中文、繁體中文、English、Bahasa Indonesia、Tiếng Việt | 🚧 |
+| 在线平台：网易云 | ✅ |
+| 在线平台：酷狗、QQ 音乐、波点、汽水 | 🚧 |
+| 多语言：简体中文、繁體中文、English、Bahasa Indonesia、Tiếng Việt | ✅ |
 
 > 安卓端不包含 Spotify。
 
@@ -53,7 +55,7 @@ Folia-rust 把 Folia 从 Electron 重写成了原生程序。Folia-rust-android 
 | 层 | 选型 |
 |---|---|
 | 页面 | Kotlin 2.4 + Jetpack Compose |
-| 桥接 | uniffi 0.32（业务接口），JNI（`Surface` 交给 wgpu） |
+| 桥接 | uniffi 0.32（业务接口），JNI（Android 上下文，以及之后把 `Surface` 交给 wgpu） |
 | 歌词渲染 | wgpu 27 + iced 子 crate，WGSL |
 | 核心 | Rust 1.99.1，Folia-rust 的 crate |
 | 构建 | Gradle 9.8 + AGP 9.5，cargo-ndk 4.1.2，NDK 29.0.14206865 |
@@ -78,22 +80,24 @@ cd Folia-rust-android
 sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk
 ```
 
-然后构建 debug APK：
+然后构建 APK：
 
 ```bash
 ./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-Windows 上用 `gradlew.bat assembleDebug`。APK 生成在 `app/build/outputs/apk/debug/app-debug.apk`。
+Windows 上用 `gradlew.bat`。debug APK 在 `app/build/outputs/apk/debug/app-debug.apk`，release APK 在 `app/build/outputs/apk/release/app-release.apk`。release 打开 R8，Rust 用 `--release`。要换发布签名时，在 `local.properties` 写上 `RELEASE_STORE_FILE`、`RELEASE_STORE_PASSWORD`、`RELEASE_KEY_ALIAS`、`RELEASE_KEY_PASSWORD`；不写就用 debug 签名，方便本机安装。密钥文件不要提交。
 
 ## 路线图
 
 - [x] 工程骨架：Gradle、Compose、Rust 桥接
-- [ ] 本地音乐扫描与播放，后台播放服务与通知栏
-- [ ] 歌词显示与歌词动画（`SurfaceView` + wgpu）
-- [ ] 在线平台：搜索、播放、扫码登录、歌单
-- [ ] 设置、多语言、主题
-- [ ] release 构建与签名
+- [x] 本地音乐扫描与播放，后台播放服务与通知栏
+- [x] 封面墙、网易云扫码与在线播放、均衡器、歌词行
+- [x] 设置、多语言、明暗主题
+- [x] release 构建、R8 与签名
+- [ ] 歌词动画（`SurfaceView` + wgpu）
+- [ ] 其余在线平台的页面
 
 ## 致谢
 
