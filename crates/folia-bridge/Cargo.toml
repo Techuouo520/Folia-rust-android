@@ -1,0 +1,39 @@
+# Minimal Android application bridge and host binding generator.
+[package]
+name = "folia-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+folia-core.workspace = true
+folia-i18n.workspace = true
+folia-lyrics.workspace = true
+folia-store.workspace = true
+folia-player.workspace = true
+folia-library.workspace = true
+folia-omni.workspace = true
+keyring.workspace = true
+thiserror.workspace = true
+uniffi.workspace = true
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

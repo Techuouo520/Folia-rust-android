@@ -1,0 +1,60 @@
+# Android workspace and shared dependency versions.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["test", "crates/cryoglyph"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "AGPL-3.0-only"
+repository = "https://github.com/Techuouo520/Folia-rust-android"
+
+[workspace.dependencies]
+folia-core = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-i18n = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-lyrics = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-store = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-player = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-library = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-omni = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main", default-features = false, features = ["netease", "kugou", "qq", "bodian", "qishui"] }
+folia-render = { path = "crates/folia-render" }
+folia-visualizer = { path = "crates/folia-visualizer" }
+bytemuck = "1.25.2"
+parking_lot = "0.12.5"
+wgpu = "27.0.1"
+flate2 = "=1.1.10"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+lyon_path = "1.0.19"
+thiserror = "2.0.21"
+toml = "1.1.8"
+tracing = "0.1.44"
+keyring = { version = "=4.2.0", features = ["android-native-keyring-store"] }
+uniffi = "=0.32.2"
+iced_core = "=0.14.0"
+iced_graphics = { version = "=0.14.0", features = ["geometry"] }
+iced_widget = { version = "=0.14.2", default-features = false, features = ["canvas", "wgpu", "image"] }
+iced_renderer = { version = "=0.14.0", features = ["wgpu"] }
+iced_wgpu = { version = "=0.14.0", features = ["web-colors"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Coverage gamma for dark text in web color mode; see crates/cryoglyph/PATCH.md.
+[patch.crates-io]
+cryoglyph = { path = "crates/cryoglyph" }

@@ -1,0 +1,5 @@
+# Android bindings use the packaged JNA native runtime.
+[bindings.kotlin]
+package_name = "io.github.techuouo520.folia.bridge"
+cdylib_name = "folia_bridge"
+android = true
