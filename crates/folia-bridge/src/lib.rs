@@ -95,6 +95,7 @@ pub struct LibraryTrack {
     pub provider: String,
     pub online_id: String,
     pub cover_url: String,
+    pub source_metadata: String,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -120,6 +121,12 @@ pub enum RepeatMode {
     One,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PlaybackIssue {
+    SubscriptionRequired,
+    CustomSourceUnavailable,
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct PlaybackSnapshot {
     pub state: TransportState,
@@ -142,6 +149,7 @@ pub struct PlaybackSnapshot {
     pub online_id: String,
     pub cover_url: String,
     pub current_lyric: Option<String>,
+    pub issue: Option<PlaybackIssue>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -298,9 +306,11 @@ impl FoliaBridge {
         }
         let settings = settings::SettingsHost::open(&dirs.config)?;
         let library = library::LibraryHost::open(&dirs.data.join("library.db"))?;
-        let online = online::OnlineHost::start(&dirs.cache)?;
+        let online = online::OnlineHost::start(&dirs.cache, &dirs.config, &dirs.data)?;
         let covers = covers::CoverHost::start(online.cover_fetcher());
-        let playback = playback::PlaybackHost::start(online.audio_fetcher(), online.lyrics_fetcher(), dirs.config.join("playback-resume.json"))?;
+        let playback = playback::PlaybackHost::start(
+            online.audio_fetcher(), online.lyrics_fetcher(), online.prefetcher(), dirs.config.join("playback-resume.json"),
+        )?;
         playback.set_volume(settings.volume())?;
         playback.set_repeat(repeat_mode(settings.repeat()))?;
         playback.set_quality(settings.audio_quality())?;
@@ -698,6 +708,11 @@ fn online_track(track: &folia_core::Track) -> LibraryTrack {
         provider,
         online_id,
         cover_url: track.cover_url.clone().unwrap_or_default(),
+        source_metadata: track.online_info.as_ref().and_then(|info| {
+            serde_json::to_string(info).map_err(|error| {
+                tracing::warn!(%error, "online source metadata could not be encoded");
+            }).ok()
+        }).unwrap_or_default(),
     }
 }
 

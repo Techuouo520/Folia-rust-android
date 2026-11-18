@@ -209,6 +209,7 @@ fn to_track(covers: &HashMap<i64, bool>, track: folia_core::Track) -> Result<Lib
         provider: String::new(),
         online_id: String::new(),
         cover_url: String::new(),
+        source_metadata: String::new(),
     })
 }
 

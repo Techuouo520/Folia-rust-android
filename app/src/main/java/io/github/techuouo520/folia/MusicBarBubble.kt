@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -34,15 +35,19 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import io.github.techuouo520.folia.bridge.FoliaBridge
 import io.github.techuouo520.folia.bridge.PlaybackSnapshot
+import io.github.techuouo520.folia.bridge.PlaybackIssue
 import io.github.techuouo520.folia.bridge.TransportState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 internal val MusicBarDockSide = 24.dp
 internal val MusicBarDockBottom = 28.dp
@@ -129,6 +134,23 @@ internal fun MusicBarBubble(
             value = source?.let { bridge.readArtwork(it) { bytes -> decodeCover(bytes, 192) } }
         }
     }
+    val providerNames by produceState<Map<String, String>>(emptyMap(), bridge) {
+        value = withContext(Dispatchers.IO) {
+            runCatching { bridge.platforms().associate { it.id to it.shortName } }.getOrDefault(emptyMap())
+        }
+    }
+    val issueText = when (playback.issue) {
+        PlaybackIssue.SUBSCRIPTION_REQUIRED -> bridge.t("status.songSubscriptionRequired")
+            .replace("{{provider}}", providerNames[playback.provider] ?: playback.provider)
+        PlaybackIssue.CUSTOM_SOURCE_UNAVAILABLE -> bridge.t("status.customSourceUnavailable")
+        null -> null
+    }
+    val previewText = when {
+        playback.queueLength == 0 -> ""
+        issueText != null -> issueText
+        playback.loading -> bridge.t("home.loading")
+        else -> playback.currentLyric ?: bridge.t("ui.noLyricsAvailable")
+    }
     val panelSide = MusicBarPanelSide
     val panelBottom = 20.dp
     val dockSide = MusicBarDockSide
@@ -191,7 +213,9 @@ internal fun MusicBarBubble(
                 onNext = { interaction++; action { bridge.next() } },
                 onOpenLyrics = { navigation?.openPlayerLyrics(); onExpanded(false) },
                 lyricsLabel = bridge.t("localMusic.lyrics"),
-                modifier = Modifier.musicBarIdleTimeout(expanded && !pressed && !seekHeld, interaction) { onExpanded(false) }
+                previewText = previewText,
+                hasIssue = issueText != null,
+                modifier = Modifier.musicBarIdleTimeout(expanded && !pressed && !seekHeld && !playback.loading, interaction) { onExpanded(false) }
                     .then(recover).onSizeChanged { panelHeight = with(density) { it.height.toDp() } },
             )
         }
@@ -237,10 +261,10 @@ private fun RecordSleeve() {
 private fun BubblePlayerPanel(
     playback: PlaybackSnapshot, cover: ImageBitmap?, motion: CornerMotion, frame: State<Int>, enabled: Boolean,
     onFold: () -> Unit, onPrevious: () -> Unit, onToggle: () -> Unit, onNext: () -> Unit, modifier: Modifier,
-    onOpenLyrics: () -> Unit, lyricsLabel: String,
+    onOpenLyrics: () -> Unit, lyricsLabel: String, previewText: String, hasIssue: Boolean,
 ) {
     val colors = MaterialTheme.colorScheme
-    val playing = playback.state == TransportState.PLAYING
+    val playing = playback.state == TransportState.PLAYING || (playback.loading && playback.state != TransportState.PAUSED)
     val hasTrack = playback.queueLength > 0
     val credits = remember(playback.artist, playback.album) {
         listOf(playback.artist, playback.album).filter { it.isNotBlank() }.distinct().joinToString(" · ")
@@ -266,18 +290,24 @@ private fun BubblePlayerPanel(
             Box(clip.heightIn(min = 48.dp).clickable(enabled = enabled && hasTrack,
                 role = Role.Button, onClickLabel = lyricsLabel, onClick = onOpenLyrics),
                 contentAlignment = Alignment.CenterStart) {
-                Text(if (hasTrack) playback.currentLyric ?: "暂无歌词" else "",
-                    color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
+                Text(previewText,
+                    color = if (hasIssue) colors.error else colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }) {
             PlayerTransport(R.drawable.salam_transport_previous_icon, "上一首", enabled && playback.hasPrevious,
                 onPrevious, Modifier.size(48.dp), direction = -1, compactWeight = 1f,
                 available = playback.hasPrevious, compactIconHeight = 15.5.dp)
-            PlayerTransport(if (playing) R.drawable.salam_transport_play else R.drawable.salam_transport_pause,
-                if (playing) "暂停" else "播放", enabled && hasTrack, onToggle,
-                Modifier.size(48.dp).background(colors.primary.copy(alpha = .10f), CircleShape),
-                compactWeight = 1f, available = hasTrack)
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                PlayerTransport(if (playing) R.drawable.salam_transport_play else R.drawable.salam_transport_pause,
+                    if (playing) "暂停" else "播放", enabled && hasTrack, onToggle,
+                    Modifier.fillMaxSize().background(colors.primary.copy(alpha = .10f), CircleShape),
+                    compactWeight = 1f, available = hasTrack)
+                if (enabled && hasTrack && playback.loading) {
+                    CircularProgressIndicator(Modifier.size(44.dp).clearAndSetSemantics {},
+                        color = colors.primary, strokeWidth = 1.5.dp)
+                }
+            }
             PlayerTransport(R.drawable.salam_transport_next, "下一首", enabled && playback.hasNext,
                 onNext, Modifier.size(48.dp), direction = 1, compactWeight = 1f,
                 available = playback.hasNext, compactIconHeight = 15.5.dp)

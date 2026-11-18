@@ -187,7 +187,8 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         }
     }
     val toggle = {
-        if (shell.playback.state == TransportState.PLAYING) {
+        val current = shell.playback
+        if (current.state == TransportState.PLAYING || (current.loading && current.state != TransportState.PAUSED)) {
             action {
                 AudioFocus.clearResume()
                 bridge.pause()
@@ -270,7 +271,7 @@ private val fullscreenMusicBarEnabled = false
 
 private fun idleShell(bridge: FoliaBridge): Shell {
     val playback = runCatching { bridge.status() }.getOrElse {
-        PlaybackSnapshot(TransportState.IDLE, 0.0, 0.0, 1f, 0L, "", "", "", "", -1, 0, false, false, RepeatMode.OFF, 0L, false, "", "", "", null)
+        PlaybackSnapshot(TransportState.IDLE, 0.0, 0.0, 1f, 0L, "", "", "", "", -1, 0, false, false, RepeatMode.OFF, 0L, false, "", "", "", null, null)
     }
     return Shell(playback, ScanSnapshot(ScanPhase.IDLE, 0, 0, 0, 0, 0, 0, "", ""), emptyList())
 }

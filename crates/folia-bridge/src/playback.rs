@@ -4,12 +4,15 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use folia_core::{AudioQuality, Lyrics, Queue, Repeat};
+use folia_core::{AudioInput, AudioQuality, Lyrics, OnlineId, OnlineTrackInfo, Queue, Repeat, Track};
+use folia_omni::PrefetchPlan;
 use folia_player::{Player, PlayerError, PlayerState};
 use parking_lot::Mutex;
 
-use crate::{BridgeError, LibraryTrack, PlaybackSnapshot, RepeatMode, TransportState};
+use crate::{BridgeError, LibraryTrack, PlaybackIssue, PlaybackSnapshot, RepeatMode, TransportState};
+use crate::online::{AudioFailure, AudioFn, PrefetchFn};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Queued {
@@ -23,6 +26,8 @@ struct Queued {
     provider: String,
     online_id: String,
     cover_url: String,
+    #[serde(default)]
+    online_info: Option<OnlineTrackInfo>,
 }
 
 impl Queued {
@@ -38,6 +43,7 @@ impl Queued {
             provider: track.provider.clone(),
             online_id: track.online_id.clone(),
             cover_url: track.cover_url.clone(),
+            online_info: serde_json::from_str(&track.source_metadata).ok(),
         }
     }
 
@@ -53,24 +59,55 @@ impl Queued {
             provider: self.provider.clone(),
             online_id: self.online_id.clone(),
             cover_url: self.cover_url.clone(),
+            source_metadata: self.online_info.as_ref()
+                .and_then(|info| serde_json::to_string(info).ok()).unwrap_or_default(),
+        }
+    }
+
+    fn core_track(&self) -> Track {
+        Track {
+            id: self.id, path: self.path.clone(), title: self.title.clone(),
+            artist: (!self.artist.is_empty()).then(|| self.artist.clone()),
+            album: (!self.album.is_empty()).then(|| self.album.clone()),
+            duration: self.duration,
+            online: (!self.online_id.is_empty()).then(|| OnlineId {
+                provider: self.provider.clone(), id: self.online_id.clone(),
+            }),
+            online_info: self.online_info.clone(),
+            cover_url: (!self.cover_url.is_empty()).then(|| self.cover_url.clone()),
+            ..Track::default()
         }
     }
 }
 
-type AudioFetch = Arc<dyn Fn(&str, &str, AudioQuality) -> Result<PathBuf, String> + Send + Sync>;
+type AudioFetch = Arc<AudioFn>;
 type LyricsFetch = Arc<dyn Fn(&str, &str) -> Result<Option<Lyrics>, String> + Send + Sync>;
 
 #[derive(serde::Serialize,serde::Deserialize)]
 struct ResumeState { version:u8, tracks:Vec<Queued>, index:usize, position:f64, repeat:Repeat }
+
+#[derive(Clone, Copy, Debug)]
+enum FailureDirection {
+    Forward,
+    Backward,
+}
 
 struct Playback {
     commands: Sender<Command>,
     player: Option<Player>,
     queue: Queue<Queued>,
     failures: usize,
+    failure_direction: FailureDirection,
     volume: f32,
     generation: i64,
     token: u64,
+    audio_request: u64,
+    audio_cancel: Option<Arc<AtomicBool>>,
+    active_input: Option<AudioInput>,
+    failed_inputs: Vec<PathBuf>,
+    prefetch: Arc<PrefetchFn>,
+    prefetch_ready: bool,
+    issue: Option<PlaybackIssue>,
     loading: bool,
     quality: AudioQuality,
     lyrics: Option<(i64, Arc<Lyrics>)>,
@@ -93,6 +130,7 @@ impl Playback {
         commands: Sender<Command>,
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
+        prefetch: Arc<PrefetchFn>,
         checkpoint: PathBuf,
     ) -> Self {
         Self {
@@ -100,9 +138,17 @@ impl Playback {
             player: None,
             queue: Queue::default(),
             failures: 0,
+            failure_direction: FailureDirection::Forward,
             volume: 1.0,
             generation: 0,
             token: 0,
+            audio_request: 0,
+            audio_cancel: None,
+            active_input: None,
+            failed_inputs: Vec::new(),
+            prefetch,
+            prefetch_ready: false,
+            issue: None,
             loading: false,
             quality: AudioQuality::High,
             lyrics: None,
@@ -228,7 +274,7 @@ impl Playback {
                     self.ensure_lyrics(retry);
                 }
             }
-            Command::Loaded { token, result } => self.loaded(token, result),
+            Command::Loaded { token, request, result } => self.loaded(token, request, result),
             Command::LyricsReady { token, generation, id, result }
                 if token == self.token && generation == self.lyrics_generation => self.store_lyrics(id, result),
             Command::LyricsReady { .. } => {},
@@ -248,6 +294,7 @@ impl Playback {
             return Err(BridgeError::Playback { reason: "queue is empty".into() });
         }
         let start = queue_index(start, tracks.len())?;
+        self.failure_direction = FailureDirection::Forward;
         self.restored=false;self.position_on_load=0.0;self.want_play=true;
         self.failures = 0;
         self.queue.replace(tracks.iter().map(Queued::from_track).collect(), start);
@@ -284,6 +331,8 @@ impl Playback {
     fn seek(&mut self, seconds: f64) -> Result<(), BridgeError> {
         if !seconds.is_finite(){return Err(BridgeError::Playback{reason:"invalid seek position".into()})}
         let seconds = seconds.max(0.0);
+        self.position_on_load = seconds;
+        self.prefetch_ready = false;
         if self.restored || self.loading {self.position_on_load=seconds;return Ok(())}
         self.ensure_player()?.seek(seconds);
         tracing::info!(seconds, "seek");
@@ -291,6 +340,12 @@ impl Playback {
     }
 
     fn stop(&mut self) -> Result<(), BridgeError> {
+        self.cancel_audio();
+        self.active_input = None;
+        self.failed_inputs.clear();
+        self.prefetch_ready = false;
+        self.issue = None;
+        self.failure_direction = FailureDirection::Forward;
         self.token=self.token.wrapping_add(1);self.loading=false;self.want_play=false;
         self.lyrics_loading = false;
         self.restored=true;self.position_on_load=0.0;
@@ -303,6 +358,11 @@ impl Playback {
     }
 
     fn clear_queue(&mut self) -> Result<(), BridgeError> {
+        self.cancel_audio();
+        self.active_input = None;
+        self.failed_inputs.clear();
+        self.prefetch_ready = false;
+        self.issue = None;
         self.token = self.token.wrapping_add(1);
         self.lyrics_generation = self.lyrics_generation.wrapping_add(1);
         self.generation = self.generation.wrapping_add(1);
@@ -316,6 +376,7 @@ impl Playback {
         self.position_on_load = 0.0;
         self.failures = 0;
         self.queue.replace(Vec::new(), 0);
+        self.failure_direction = FailureDirection::Forward;
         if let Some(player) = self.player.take() {
             player.stop();
         }
@@ -349,9 +410,10 @@ impl Playback {
     }
 
     fn previous(&mut self) -> Result<(), BridgeError> {
-        self.restored=false;self.position_on_load=0.0;self.want_play=true;
-        self.failures = 0;
         if self.queue.back().is_some() {
+            self.restored=false;self.position_on_load=0.0;self.want_play=true;
+            self.failures = 0;
+            self.failure_direction = FailureDirection::Backward;
             self.start_current()
         } else {
             tracing::info!("no previous track");
@@ -366,6 +428,7 @@ impl Playback {
             return bad_index(index).map(|_| ());
         }
         self.failures = 0;
+        self.failure_direction = FailureDirection::Forward;
         self.start_current()
     }
 
@@ -391,7 +454,38 @@ impl Playback {
     }
 
     fn pump(&mut self) -> Result<(), BridgeError> {
-        match self.player.as_ref().map(Player::status).map(|status| status.state) {
+        self.commit_audio_cache();
+        let status = self.player.as_ref().map(Player::status);
+        if let Some(status) = status {
+            if !self.loading && !self.player.as_ref().is_some_and(Player::is_buffering)
+                && ((status.state == PlayerState::Playing && status.position > self.position_on_load)
+                    || status.state == PlayerState::Ended)
+            {
+                self.failures = 0;
+                self.prefetch_ready = true;
+            }
+            if status.state == PlayerState::Failed {
+                let failed = self.active_input.as_ref().filter(|input| {
+                    input.download.as_ref().is_some_and(|download| download.progress().2.is_some())
+                }).map(|input| input.path.clone());
+                if let Some(path) = failed {
+                    if !self.failed_inputs.contains(&path) { self.failed_inputs.push(path); }
+                    self.position_on_load = status.position;
+                    self.active_input = None;
+                    self.prefetch_ready = false;
+                    if let Some(player) = &self.player { player.stop(); }
+                    if !self.want_play {
+                        self.stop_failed_track();
+                        return Ok(());
+                    }
+                    if let Some(track) = self.queue.current().cloned() {
+                        tracing::warn!("audio stream failed; continuing source fallback");
+                        return self.request_audio(&track);
+                    }
+                }
+            }
+        }
+        match status.map(|status| status.state) {
             Some(PlayerState::Ended) if self.want_play => self.advance(true),
             Some(PlayerState::Failed) => {
                 // Recover the same song/position once after a native route disconnect.
@@ -407,6 +501,8 @@ impl Playback {
     }
 
     fn advance(&mut self, finished: bool) -> Result<(), BridgeError> {
+        self.failure_direction = FailureDirection::Forward;
+        if finished { self.failures = 0; }
         self.restored=false;self.position_on_load=0.0;self.want_play=true;
         if self.queue.advance(finished).is_some() {
             self.start_current()
@@ -420,16 +516,38 @@ impl Playback {
     fn fail(&mut self) -> Result<(), BridgeError> {
         self.failures += 1;
         let len = self.queue.items().len();
-        if len == 0 || self.failures >= len {
-            self.failures = 0;
-            if let Some(player) = self.player.as_ref() {
-                player.stop();
-            }
-            tracing::error!("playback stopped after repeated failures");
+        if !self.want_play || len == 0 || self.failures >= len {
+            self.stop_failed_track();
             return Ok(());
         }
-        tracing::warn!(failures = self.failures, "skipping a track that failed to play");
-        self.advance(false)
+        // Keep the failure budget and the user's navigation direction across this chain.
+        let moved = match self.failure_direction {
+            FailureDirection::Forward => self.queue.advance(false).is_some(),
+            FailureDirection::Backward => self.queue.back().is_some(),
+        };
+        if !moved {
+            self.stop_failed_track();
+            return Ok(());
+        }
+        self.restored = false;
+        tracing::warn!(failures = self.failures, direction = ?self.failure_direction, "skipping a track that failed to play");
+        self.start_current()
+    }
+
+    fn stop_failed_track(&mut self) {
+        self.cancel_audio();
+        self.active_input = None;
+        self.prefetch_ready = false;
+        self.failures = 0;
+        self.want_play = false;
+        self.loading = false;
+        self.recovering = false;
+        self.restored = true;
+        if let Some(player) = self.player.take() {
+            player.stop();
+        }
+        // The failed audio job is already complete. Retain this token for pending lyrics.
+        tracing::warn!("playback stopped at an unavailable track");
     }
 
     fn start_current(&mut self) -> Result<(), BridgeError> {
@@ -439,6 +557,11 @@ impl Playback {
         };
         if !self.restored {self.position_on_load=0.0;self.want_play=true;self.recovering=false;}
         self.restored=false;
+        self.cancel_audio();
+        self.active_input = None;
+        self.failed_inputs.clear();
+        self.prefetch_ready = false;
+        self.issue = None;
         self.token = self.token.wrapping_add(1);
         self.lyrics = None;
         self.lyrics_loading = false;
@@ -447,7 +570,7 @@ impl Playback {
         if let Some(player) = self.player.as_ref() {
             player.stop();
         }
-        if track.path.is_file() {
+        if track.online_id.is_empty() && track.path.is_file() {
             tracing::info!(title = %track.title, path = %track.path.display(), "playing");
             self.loading = false;
             let position=self.position_on_load;let playing=self.want_play;
@@ -461,16 +584,30 @@ impl Playback {
             return self.fail();
         }
         self.spawn_lyrics(&track);
+        self.request_audio(&track)
+    }
+
+    fn cancel_audio(&mut self) {
+        if let Some(cancelled) = self.audio_cancel.take() { cancelled.store(true, Ordering::Release); }
+        self.audio_request = self.audio_request.wrapping_add(1);
+    }
+
+    fn request_audio(&mut self, track: &Queued) -> Result<(), BridgeError> {
+        self.cancel_audio();
+        self.loading = true;
         tracing::info!(title = %track.title, provider = %track.provider, song = %track.online_id, "fetching audio");
         let token = self.token;
+        let request = self.audio_request;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.audio_cancel = Some(cancelled.clone());
         let fetch = Arc::clone(&self.audio_fetch);
         let commands = self.commands.clone();
-        let provider = track.provider.clone();
-        let song = track.online_id.clone();
+        let track = track.core_track();
+        let failed = self.failed_inputs.clone();
         let quality = self.quality;
         let spawned = std::thread::Builder::new().name("folia-audio".into()).spawn(move || {
-            let result = fetch(&provider, &song, quality);
-            if commands.send(Command::Loaded { token, result }).is_err() {
+            let result = fetch(track, quality, failed, cancelled);
+            if commands.send(Command::Loaded { token, request, result }).is_err() {
                 tracing::warn!("playback thread dropped an audio download");
             }
         });
@@ -482,27 +619,38 @@ impl Playback {
         Ok(())
     }
 
-    fn loaded(&mut self, token: u64, result: Result<PathBuf, String>) {
-        if token != self.token {
+    fn loaded(&mut self, token: u64, request: u64, result: Result<AudioInput, AudioFailure>) {
+        if token != self.token || request != self.audio_request {
             tracing::info!("ignoring an audio download for a track that is no longer current");
             return;
         }
         match result {
-            Ok(path) => {
-                if let Some(track) = self.queue.current_mut() {
-                    track.path = path.clone();
-                }
+            Ok(input) => {
                 self.loading = false;
                 let position=self.position_on_load;let playing=self.want_play;
                 match self.ensure_player() {
                     Ok(player) => {
-                        player.load_at(&path,position,playing);
-                        tracing::info!(path = %path.display(), "online audio ready");
+                        player.load_input_at(input.clone(),position,playing);
+                        self.active_input = Some(input);
+                        self.commit_audio_cache();
+                        tracing::info!("online audio prefix ready");
                     }
-                    Err(error) => tracing::error!(error = %error, "cannot play the downloaded audio"),
+                    Err(error) => {
+                        tracing::error!(error = %error, "cannot start audio output");
+                        self.stop_failed_track();
+                    }
                 }
             }
-            Err(error) => {
+            Err(AudioFailure::SubscriptionRequired) => {
+                self.issue = Some(PlaybackIssue::SubscriptionRequired);
+                self.stop_failed_track();
+            }
+            Err(AudioFailure::CustomSourceUnavailable) => {
+                self.issue = Some(PlaybackIssue::CustomSourceUnavailable);
+                self.stop_failed_track();
+            }
+            Err(AudioFailure::Cancelled) => { self.loading = false; }
+            Err(AudioFailure::Other(error)) => {
                 tracing::warn!(error, "audio download failed");
                 self.loading = false;
                 if let Err(play_error) = self.fail() {
@@ -510,6 +658,29 @@ impl Playback {
                 }
             }
         }
+    }
+
+    fn commit_audio_cache(&mut self) {
+        let Some(input) = &self.active_input else { return };
+        let Some(track) = self.queue.current_mut() else { return };
+        if track.online_id.is_empty() || track.path == input.path { return; }
+        let complete = input.download.as_ref().is_none_or(|download| {
+            let (_, done, error) = download.progress();
+            done && error.is_none()
+        });
+        // A progressive input names its final cache file; the reader owns the unfinished file.
+        if complete && input.path.is_file() { track.path = input.path.clone(); }
+    }
+
+    fn refresh_prefetch(&self) {
+        let ready = self.prefetch_ready && self.want_play && !self.loading
+            && !self.player.as_ref().is_some_and(Player::is_buffering);
+        let tracks = if ready {
+            folia_omni::prefetch_indices(self.queue.items().len(), self.queue.current_index(), self.queue.repeat)
+                .into_iter().filter_map(|index| self.queue.items().get(index))
+                .filter(|track| !track.online_id.is_empty()).map(Queued::core_track).collect()
+        } else { Vec::new() };
+        (self.prefetch)(PrefetchPlan { tracks, quality: self.quality });
     }
 
     fn ensure_lyrics(&mut self, retry: bool) {
@@ -658,7 +829,7 @@ impl Playback {
             has_previous: self.queue.previous_index().is_some(),
             repeat_mode: self.queue.repeat.into(),
             queue_generation: self.generation,
-            loading: self.loading,
+            loading: self.loading || self.player.as_ref().is_some_and(Player::is_buffering),
             provider: current.map(|track| track.provider.clone()).unwrap_or_default(),
             online_id: current.map(|track| track.online_id.clone()).unwrap_or_default(),
             cover_url: current.map(|track| track.cover_url.clone()).unwrap_or_default(),
@@ -666,6 +837,7 @@ impl Playback {
                 .filter(|(id, lyrics)| Some(*id) == current.map(|track| track.id) && !lyrics.lines.is_empty())
                 .map(|(_, lyrics)| folia_lyrics::active_line(&lyrics.lines, position)
                     .map(|index| lyrics.lines[index].text.clone()).unwrap_or_default()),
+            issue: self.issue,
         }
     }
 }
@@ -693,7 +865,7 @@ enum Command {
     #[cfg(target_os = "android")]
     RequestLyrics { id: i64, provider: String, online_id: String, retry: bool },
     Shutdown,
-    Loaded { token: u64, result: Result<PathBuf, String> },
+    Loaded { token: u64, request: u64, result: Result<AudioInput, AudioFailure> },
     LyricsReady { token: u64, generation: u64, id: i64, result: Result<Option<Lyrics>, String> },
 }
 
@@ -731,6 +903,7 @@ impl PlaybackHost {
     pub(crate) fn start(
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
+        prefetch: Arc<PrefetchFn>,
         checkpoint: PathBuf,
     ) -> Result<Self, BridgeError> {
         let (commands, receiver) = mpsc::channel();
@@ -741,7 +914,7 @@ impl PlaybackHost {
         let thread_commands = commands.clone();
         let thread = std::thread::Builder::new()
             .name("folia-playback".into())
-            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, checkpoint, #[cfg(target_os = "android")] publisher))
+            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, prefetch, checkpoint, #[cfg(target_os = "android")] publisher))
             .map_err(|error| {
                 tracing::error!(error = &error as &dyn std::error::Error, "cannot start the playback thread");
                 BridgeError::Playback { reason: error.to_string() }
@@ -880,12 +1053,14 @@ fn run(
     commands: Sender<Command>,
     audio: AudioFetch,
     lyrics: LyricsFetch,
+    prefetch: Arc<PrefetchFn>,
     checkpoint: PathBuf,
     #[cfg(target_os = "android")] monet: MonetFeed,
 ) {
-    let mut playback = Playback::new(commands, audio, lyrics, checkpoint);
+    let mut playback = Playback::new(commands, audio, lyrics, prefetch, checkpoint);
     playback.restore();
     loop {
+        playback.refresh_prefetch();
         #[cfg(target_os = "android")]
         playback.publish_monet(&monet);
         match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
@@ -899,6 +1074,8 @@ fn run(
         }
     }
     playback.save(true);
+    playback.cancel_audio();
+    (playback.prefetch)(PrefetchPlan { tracks: Vec::new(), quality: playback.quality });
     tracing::info!("playback thread stopped");
 }
 

@@ -46,7 +46,8 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         val created = FoliaPlayer(this, FoliaApp.from(this).bridge, Looper.getMainLooper())
         created.onSnapshot = { snapshot ->
-            val ongoing = snapshot.state == io.github.techuouo520.folia.bridge.TransportState.PLAYING || snapshot.loading
+            val ongoing = snapshot.state == io.github.techuouo520.folia.bridge.TransportState.PLAYING ||
+                (snapshot.loading && snapshot.state != io.github.techuouo520.folia.bridge.TransportState.PAUSED)
             if (ongoing && !wakeLock.isHeld) wakeLock.acquire()
             if (!ongoing && wakeLock.isHeld) wakeLock.release()
         }

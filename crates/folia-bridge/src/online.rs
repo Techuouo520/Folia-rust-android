@@ -2,21 +2,42 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use folia_core::{AudioQuality, Lyrics, OnlineId, Track};
+use folia_core::{AudioInput, AudioQuality, Lyrics, OnlineId, Track};
 use folia_omni::{
     Account, Collection, CollectionKind, ExploreEntry, ExploreSection, LoginQr, LoginState, Omni, OmniError, Page,
-    Platform, RadioFeed,
+    Platform, PrefetchPlan, RadioFeed,
 };
 use parking_lot::Mutex;
 
 use crate::BridgeError;
 
 pub(crate) type CoverFn = dyn Fn(&str, u32) -> Result<Vec<u8>, String> + Send + Sync;
-pub(crate) type AudioFn = dyn Fn(&str, &str, AudioQuality) -> Result<PathBuf, String> + Send + Sync;
+pub(crate) type AudioFn =
+    dyn Fn(Track, AudioQuality, Vec<PathBuf>, Arc<AtomicBool>) -> Result<AudioInput, AudioFailure> + Send + Sync;
 pub(crate) type LyricsFn = dyn Fn(&str, &str) -> Result<Option<Lyrics>, String> + Send + Sync;
+pub(crate) type PrefetchFn = dyn Fn(PrefetchPlan) + Send + Sync;
+
+#[derive(Clone, Debug)]
+pub(crate) enum AudioFailure {
+    SubscriptionRequired,
+    CustomSourceUnavailable,
+    Cancelled,
+    Other(String),
+}
+
+type SourceReadiness = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
+
+#[derive(Default)]
+struct PrefetchState {
+    plan: Option<PrefetchPlan>,
+    revision: u64,
+    generation: u64,
+    task: Option<tokio::task::AbortHandle>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoginPhase {
@@ -128,20 +149,42 @@ pub(crate) struct OnlineHost {
     runtime: tokio::runtime::Runtime,
     state: Arc<Mutex<State>>,
     login_gate: Arc<tokio::sync::Mutex<()>>,
+    sources_ready: SourceReadiness,
+    prefetch: Arc<Mutex<PrefetchState>>,
 }
 
 impl OnlineHost {
-    pub(crate) fn start(cache: &Path) -> Result<Self, BridgeError> {
+    pub(crate) fn start(cache: &Path, config: &Path, data: &Path) -> Result<Self, BridgeError> {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().map_err(|error| {
                 tracing::error!(error = &error as &dyn std::error::Error, "cannot start the online runtime");
                 BridgeError::Online { reason: error.to_string() }
             })?;
         let omni = Omni::new(cache.to_owned(), "Folia".to_owned()).map_err(online_err)?;
+        let (initialized, sources_ready) = tokio::sync::watch::channel(None);
+        let source_omni = omni.clone();
+        let source_config = config.to_owned();
+        let source_data = data.to_owned();
+        runtime.spawn(async move {
+            // Loading source settings can compile scripts, so never do this on the UI or async worker threads.
+            let result = match blocking(source_omni, move |omni| {
+                omni.restore_sources(folia_store::Store::at(source_config), source_data)
+                    .map(|_| ())
+                    .map_err(|error| folia_store::error_chain(&error))
+            }).await {
+                Ok(result) => result,
+                Err(()) => Err("custom source initialization worker stopped".to_owned()),
+            };
+            if let Err(error) = &result {
+                tracing::warn!(error, "audio source settings could not be restored");
+            }
+            let _ = initialized.send(Some(result));
+        });
         tracing::info!(providers = omni.providers().len(), "online runtime ready");
         Ok(Self {
             omni, runtime, state: Arc::new(Mutex::new(State::new())),
             login_gate: Arc::new(tokio::sync::Mutex::new(())),
+            sources_ready, prefetch: Arc::new(Mutex::new(PrefetchState::default())),
         })
     }
 
@@ -161,10 +204,63 @@ impl OnlineHost {
     pub(crate) fn audio_fetcher(&self) -> Arc<AudioFn> {
         let omni = self.omni.clone();
         let handle = self.runtime.handle().clone();
-        Arc::new(move |provider: &str, song: &str, quality: AudioQuality| {
+        let sources_ready = self.sources_ready.clone();
+        Arc::new(move |track: Track, quality: AudioQuality, failed: Vec<PathBuf>, cancelled: Arc<AtomicBool>| {
             let omni = omni.clone();
-            let song = OnlineId { provider: provider.to_owned(), id: song.to_owned() };
-            handle.block_on(async move { omni.fetch_audio(&song, quality).await.map_err(|error| error.to_string()) })
+            let sources_ready = sources_ready.clone();
+            handle.block_on(async move {
+                let result = tokio::select! {
+                    biased;
+                    () = audio_cancelled(&cancelled) => Err(AudioFailure::Cancelled),
+                    result = async {
+                        await_sources(sources_ready).await.map_err(AudioFailure::Other)?;
+                        omni.prepare_track_audio_after(&track, quality, &failed).await.map_err(audio_failure)
+                    } => result,
+                };
+                if cancelled.load(Ordering::Acquire) { Err(AudioFailure::Cancelled) } else { result }
+            })
+        })
+    }
+
+    pub(crate) fn prefetcher(&self) -> Arc<PrefetchFn> {
+        let omni = self.omni.clone();
+        let handle = self.runtime.handle().clone();
+        let sources_ready = self.sources_ready.clone();
+        let state = Arc::clone(&self.prefetch);
+        Arc::new(move |plan: PrefetchPlan| {
+            let revision = omni.audio_cache_revision();
+            let mut guard = state.lock();
+            if guard.plan.as_ref() == Some(&plan) && guard.revision == revision {
+                return;
+            }
+            guard.generation = guard.generation.wrapping_add(1);
+            let generation = guard.generation;
+            if let Some(previous) = guard.task.take() {
+                previous.abort();
+            }
+            guard.plan = Some(plan.clone());
+            guard.revision = revision;
+            if plan.tracks.is_empty() {
+                return;
+            }
+            let omni = omni.clone();
+            let sources_ready = sources_ready.clone();
+            let task_state = Arc::clone(&state);
+            let task = handle.spawn(async move {
+                if let Err(error) = await_sources(sources_ready).await {
+                    tracing::debug!(error, "audio prefetch skipped because source initialization failed");
+                    return;
+                }
+                {
+                    let mut guard = task_state.lock();
+                    if guard.generation != generation {
+                        return;
+                    }
+                    guard.revision = omni.audio_cache_revision();
+                }
+                omni.prefetch(plan).await;
+            });
+            guard.task = Some(task.abort_handle());
         })
     }
 
@@ -689,6 +785,30 @@ fn signed_out() -> SessionView {
 
 fn current(state: &Mutex<State>, generation: u64) -> bool {
     state.lock().login_generation == generation
+}
+
+async fn await_sources(mut readiness: SourceReadiness) -> Result<(), String> {
+    loop {
+        let state = readiness.borrow().clone();
+        if let Some(result) = state {
+            return result;
+        }
+        readiness.changed().await.map_err(|_| "audio source initialization did not complete".to_owned())?;
+    }
+}
+
+async fn audio_cancelled(cancelled: &AtomicBool) {
+    while !cancelled.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn audio_failure(error: OmniError) -> AudioFailure {
+    match error {
+        OmniError::SubscriptionRequired => AudioFailure::SubscriptionRequired,
+        OmniError::CustomSourceUnavailable => AudioFailure::CustomSourceUnavailable,
+        error => AudioFailure::Other(error_text(&error)),
+    }
 }
 
 struct LoginRound {

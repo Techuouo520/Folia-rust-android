@@ -108,7 +108,7 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
             dark = night
             ticker?.applyDarkMode(night)
         }
-        val nextPlaying = snapshot.state == TransportState.PLAYING
+        val nextPlaying = snapshot.state == TransportState.PLAYING && !snapshot.loading
         val nextPosition = (snapshot.positionSeconds * 1000).roundToLong()
         val clockChanged = position != nextPosition || nextPlaying != playing || active != visible
         active = visible

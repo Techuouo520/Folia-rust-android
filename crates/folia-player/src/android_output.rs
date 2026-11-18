@@ -46,8 +46,9 @@ unsafe extern "C" fn render(owner:*mut c_void,data:*mut f32,frames:i32,device:i3
  // API 26/27 retain dry playback; no unsupported -55 dB/DP contract is claimed there.
  if bass::ERROR.load(Ordering::Acquire)!=0{c.shared.set_state(PlayerState::Failed);return}
  let paired=c.session>0;
- if c.shared.state()!=PlayerState::Playing||(paired&&bass::READY.load(Ordering::Acquire)!=c.token){c.ramp=0.;return}
+ if c.shared.state()!=PlayerState::Playing||(paired&&bass::READY.load(Ordering::Acquire)!=c.token){c.shared.starved.store(false,Ordering::Release);c.ramp=0.;return}
  let available=c.consumer.slots().min(out.len())/2*2;let done=c.shared.decoder_done.load(Ordering::Acquire);
+ c.shared.starved.store(available<out.len()&&!done,Ordering::Release);
  if available<out.len()&&!done&&c.shared.started(){c.shared.add_underrun(((out.len()-available)/2)as u64);}
  if let Ok(chunk)=c.consumer.read_chunk(available){
   let(a,b)=chunk.as_slices();let gain=if paired{bass::HEADROOM}else{1.};

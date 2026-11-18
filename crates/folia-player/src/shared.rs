@@ -53,6 +53,7 @@ pub struct Shared {
     /// Set by the decoder once every sample of the track is in the ring buffer.
     pub decoder_done: AtomicBool,
     pub duration: AtomicF64,
+    pub starved: AtomicBool,
     /// Callbacks that ran dry mid-track since the last report, and the frames they filled with silence.
     underruns: AtomicU64,
     silent_frames: AtomicU64,
@@ -71,6 +72,7 @@ impl Shared {
             flush_done: AtomicU64::new(0),
             decoder_done: AtomicBool::new(false),
             duration: AtomicF64::default(),
+            starved: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             silent_frames: AtomicU64::new(0),
         }
