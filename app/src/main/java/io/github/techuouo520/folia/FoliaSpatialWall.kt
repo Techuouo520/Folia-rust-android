@@ -11,6 +11,7 @@ import io.github.techuouo520.folia.bridge.LibraryTrack
 import io.github.techuouo520.folia.bridge.TransportState
 import io.github.techuouo520.folia.spatial.SpatialItem
 import io.github.techuouo520.folia.spatial.SpatialMap
+import io.github.techuouo520.folia.spatial.SpatialCoverSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -24,15 +25,18 @@ internal fun FoliaSpatialWall(bridge: FoliaBridge,items: List<WallItem>,shell: S
     var favorites by remember { mutableStateOf(store.getStringSet("favorites",emptySet())!!.toSet()) }
     val visible=remember(items,hidden) { items.filter { it.key !in hidden } }
     val lookup=rememberUpdatedState(remember(items) { items.associateBy { it.key } })
+    val coverSources = rememberUpdatedState(remember(items) {
+        items.associateBy { SpatialCoverSource.key(it.path, it.url) }
+    })
     val scope=rememberCoroutineScope()
     val collections=remember(bridge,scope) { CollectionCache(bridge,scope) }
     val warmKeys=remember(visible) { visible.filter {it.kind !in setOf("song","explore-song","fm")}.take(2) }
     LaunchedEffect(warmKeys) { warmKeys.forEach {collections.request(it.key,it.title,it.url)} }
     val source=remember(bridge) { { key: String ->
-        val item=lookup.value[key]
+        val item=coverSources.value[key]
         if(item==null || (item.path.isEmpty()&&item.url.isEmpty())) null
         else {
-            val requestKey="spatial-original:${item.key}:${item.path}:${item.url}"
+            val requestKey="spatial-original:${SpatialCoverSource.version(key)}"
             bridge.requestCovers(listOf(CoverAsk(requestKey,item.path,item.url,1536,1536)))
             val until=System.nanoTime()+8_000_000_000L
             var result: ByteArray?=null
@@ -72,7 +76,7 @@ internal fun FoliaSpatialWall(bridge: FoliaBridge,items: List<WallItem>,shell: S
     SpatialMap(
         bottomInset=bottomInset,
         onFramePresented=onFramePresented,
-        items=remember(visible) { visible.map { SpatialItem(it.key,it.title,it.subtitle,if(it.url.isNotEmpty()||it.path.isNotEmpty()) it.key else "",it.path,it.kind !in setOf("song","explore-song","fm")) } },
+        items=remember(visible) { visible.map { SpatialItem(it.key,it.title,it.subtitle,SpatialCoverSource.key(it.path,it.url),it.path,it.kind !in setOf("song","explore-song","fm")) } },
         dark=LocalFoliaDark.current,playingKey=playingKey,playing=shell.playback.state==TransportState.PLAYING,
         onCollectionVisible=onCollectionVisible,
         onPreload={ item -> lookup.value[item.key]?.let {collections.request(it.key,it.title,it.url)} },

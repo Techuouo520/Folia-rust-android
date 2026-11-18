@@ -114,8 +114,10 @@ impl Wave{
  pub fn new()->Self{let _=profile();let _=ambient(0);Self{springs:HashMap::with_capacity(256),changed:Vec::with_capacity(256),sightline:None,playing:None,duration_scale:1.,strength:1.}}
  pub fn browse()->Self{let mut wave=Self::new();wave.duration_scale=0.52;wave.strength=BROWSE_STRENGTH;wave}
  pub fn clear(&mut self){self.springs.clear();self.changed.clear();self.playing=None;}
+ #[cfg(test)]
  pub fn is_empty(&self)->bool{self.springs.is_empty()}
  pub fn height(&self,cell:usize)->f32{self.springs.get(&cell).map(|s|s.motion.value).unwrap_or(0.)}
+ #[cfg(test)]
  pub fn velocity(&self,cell:usize)->f32{self.springs.get(&cell).map(|s|s.motion.velocity).unwrap_or(0.)}
  pub fn mark_all_changed(&mut self){
   // Keep the final zero-height update of a spring retired by step this frame.

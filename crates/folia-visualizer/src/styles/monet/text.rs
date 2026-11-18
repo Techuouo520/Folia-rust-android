@@ -204,7 +204,13 @@ pub struct Raster {
 /// from the synthetic faces and are slanted like a browser's faux italic.
 pub fn raster_italic(text: &str, px: f32, line_height: f32, font: Font, color: Color, scale: f32) -> Option<Raster> {
     let font = Font { style: iced_core::font::Style::Italic, ..font };
-    let (alpha, w, h, pad, missing) = coverage(text, px, line_height, font, scale, Some(slanted_faces()))?;
+    raster(text, px, line_height, font, color, scale)
+}
+
+// Cache the glyph coverage independently of the animated position and opacity.
+pub(super) fn raster(text: &str, px: f32, line_height: f32, font: Font, color: Color, scale: f32) -> Option<Raster> {
+    let synthetic = (font.style != iced_core::font::Style::Normal).then(slanted_faces);
+    let (alpha, w, h, pad, missing) = coverage(text, px, line_height, font, scale, synthetic)?;
     let [r, g, b, a] = color.into_rgba8();
     let pixels: Vec<u8> =
         alpha.into_iter().flat_map(|v| [r, g, b, (u16::from(v) * u16::from(a) / 255) as u8]).collect();

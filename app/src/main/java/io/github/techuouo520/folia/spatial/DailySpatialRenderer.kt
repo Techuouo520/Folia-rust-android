@@ -103,6 +103,16 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     private val uploadFences:LongArray = LongArray(3)
     private var nextUpload:Int = 0
     private var uploadRetryPosted:Boolean = false
+    // Match the 25 packed vec4 uniforms shared by the wall and Rhine cover shaders.
+    private val coverBlend = FloatArray(((HIGH + 4) / 4) * 4) { 1f }
+    private val coverBlendStarted = LongArray(HIGH + 1)
+    private var lastCoverFrameNanos = 0L
+    private var coverFadeActive = false
+    private var coverFadePosted = false
+    private val coverFade = Runnable {
+        coverFadePosted = false
+        if (!closed && texturesReady) requestLast()
+    }
     private var bindingsTopology:Float = -1f
     private var bindingsCatalogue:Int = -1
     private var bindingsContent:Int = -1
@@ -207,11 +217,11 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             }
         }
         fun add(asset:CoverAsset?) {
-            if (assets.size < HIGH && !asset!!.url!!.isEmpty() && wanted.add(asset)) assets.add(asset)
+            if (assets.size < HIGH && !asset!!.url.isEmpty() && wanted.add(asset)) assets.add(asset)
         }
     }
     private fun wantHigh(asset:CoverAsset?) {
-        if (asset != null && !asset!!.url!!.isEmpty() && visibleHigh.size < HIGH) visibleHigh.add(asset)
+        if (asset != null && !asset.url.isEmpty() && visibleHigh.size < HIGH) visibleHigh.add(asset)
     }
     private fun wantHighTrack(index:Int) {
         if (index >= 0 && index < trackAssets.size) wantHigh(trackAssets.get(index))
@@ -225,7 +235,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     init{
         this.context = context!!.getApplicationContext()
         this.density = displayDensity
-        this.tablet = context!!.getResources().getConfiguration().smallestScreenWidthDp >= 600
+        this.tablet = context.getResources().getConfiguration().smallestScreenWidthDp >= 600
         thread.start()
         worker = Handler(thread.getLooper())
     }
@@ -267,21 +277,61 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             assetsByUrl.clear()
             trackAssets.clear()
             // Reuse owners of resident textures; do not retain unrelated old catalogues.
-            for (asset in previewKeys) if (asset != null) assetsByUrl.put(asset!!.url, asset)
-            for (asset in keys) if (asset != null) assetsByUrl.put(asset!!.url, asset)
+            for (asset in previewKeys) if (asset != null) assetsByUrl.put(asset.url, asset)
+            for (asset in keys) if (asset != null) assetsByUrl.put(asset.url, asset)
         }
-        for (track in values!!) trackAssets.add(assetsByUrl.computeIfAbsent(track!!.coverUrl, { CoverAsset(it) }))
+        for (track in values!!) trackAssets.add(assetsByUrl.computeIfAbsent(track.coverUrl, { CoverAsset(it) }))
     }
     private fun resetAssets() {
         for (asset in assetsByUrl.values) {
-            asset!!.preview = -1
-            asset!!.high = 0
-            asset!!.resolvedEpoch = -1
+            asset.preview = -1
+            asset.high = 0
+            asset.resolvedEpoch = -1
         }
         java.util.Arrays.fill(keys, null)
         java.util.Arrays.fill(previewKeys, null)
         java.util.Arrays.fill(loaded, false)
         java.util.Arrays.fill(previewLoaded, false)
+        java.util.Arrays.fill(coverBlend, 1f)
+        java.util.Arrays.fill(coverBlendStarted, 0L)
+        lastCoverFrameNanos = 0L
+        coverFadeActive = false
+    }
+    private fun assignHigh(slot: Int, asset: CoverAsset) {
+        keys[slot]?.high = 0
+        keys[slot] = asset
+        asset.high = slot
+        loaded[slot] = false
+        coverBlend[slot] = 0f
+        coverBlendStarted[slot] = 0L
+    }
+
+    private fun advanceCoverBlend(now: Long): Boolean {
+        var changed = false
+        coverFadeActive = false
+        for (slot in 1..HIGH) {
+            val started = coverBlendStarted[slot]
+            if (started == 0L) continue
+            val elapsed = (now - maxOf(lastCoverFrameNanos, started)).coerceIn(0L, 50_000_000L)
+            val progress = (coverBlend[slot] + elapsed.toFloat() / COVER_FADE_NANOS.toFloat()).coerceAtMost(1f)
+            if (coverBlend[slot] != progress) {
+                coverBlend[slot] = progress
+                changed = true
+            }
+            if (progress < 1f) coverFadeActive = true else coverBlendStarted[slot] = 0L
+        }
+        lastCoverFrameNanos = now
+        return changed
+    }
+
+    private fun scheduleCoverFade() {
+        if (!coverFadeActive) {
+            if (coverFadePosted) worker!!.removeCallbacks(coverFade)
+            coverFadePosted = false
+        } else if (!coverFadePosted) {
+            coverFadePosted = true
+            worker!!.postDelayed(coverFade, 16L)
+        }
     }
     fun setLayoutStyle(style:Int) {
         worker!!.post({ layoutStyle = style
@@ -401,8 +451,8 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         drawnRevision = -1f
         backgroundRevision = -1f
         packedCount = -1
-        main.post({ if (!closed && plan!!.epoch == generation) {
-                if (plan!!.holdScene) plan!!.ready!!.run()
+        main.post({ if (!closed && plan.epoch == generation) {
+                if (plan.holdScene) plan.ready!!.run()
                 listener!!.onDirty()
             } })
     }
@@ -413,9 +463,9 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             var pending = 0
             var uploads = 0
             var bindingsChanged = false
-            for (asset in plan!!.assets)
+            for (asset in plan.assets)
             {
-                var slot = asset!!.high
+                var slot = asset.high
                 if (slot == 0)
                 {
                     var oldest = Long.MAX_VALUE
@@ -424,16 +474,13 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                             slot = k
                             break
                         }
-                        if (!plan!!.wanted.contains(keys[k]) && used[k] < oldest) {
+                        if (!plan.wanted.contains(keys[k]) && used[k] < oldest) {
                             slot = k
                             oldest = used[k]
                         }
                     }
                     if (slot > 0) {
-                        if (keys[slot] != null) keys[slot]!!.high = 0
-                        keys[slot] = asset
-                        asset!!.high = slot
-                        loaded[slot] = false
+                        assignHigh(slot, asset)
                         bindingsChanged = true
                     }
                 }
@@ -443,20 +490,20 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                 }
                 used[slot] = ++clock
                 if (loaded[slot]) continue
-                val pixels = covers!!.full(asset!!.url)
-                if (pixels != null && uploads < (if (plan!!.holdScene) 4 else 1) && uploadHigh(slot, pixels))
+                val pixels = covers!!.full(asset.url)
+                if (pixels != null && uploads < (if (plan.holdScene) 4 else 1) && uploadHigh(slot, pixels))
                 {
                     loaded[slot] = true
-                    covers!!.uploaded(asset!!.url)
+                    covers.uploaded(asset.url)
                     uploads++
                 }
-                else if (!covers!!.unavailable(asset!!.url)) {
-                    covers!!.request(asset!!.url, true)
+                else if (!covers.unavailable(asset.url)) {
+                    covers.request(asset.url, true)
                     pending++
                 }
             }
-            if (uploads > 0 && plan!!.holdScene) GLES30.glFlush() // Hidden preparation has no window swap.
-            if (!plan!!.holdScene && (bindingsChanged || uploads > 0))
+            if (uploads > 0 && plan.holdScene) GLES30.glFlush() // Hidden preparation has no window swap.
+            if (!plan.holdScene && (bindingsChanged || uploads > 0))
             {
                 // Slot reuse invalidates packed bindings as well as the retained background.
                 bindingsTopology = -1f
@@ -466,7 +513,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                 requestLast()
             }
             // A failed source cannot lock playback/navigation forever. Retain its preview fallback.
-            if (pending == 0 || System.nanoTime() >= plan!!.deadline) {
+            if (pending == 0 || System.nanoTime() >= plan.deadline) {
                 finishArtwork(plan)
                 return
             }
@@ -475,7 +522,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         catch (error:Exception) {
             artworkPlan = null
             covers!!.highPreparation(false)
-            if (plan!!.holdScene) fail() else requestLast()
+            if (plan.holdScene) fail() else requestLast()
         }
 
     }
@@ -585,49 +632,49 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     }
     private fun beginCapture() {
         val job = capture
-        if (job == null || job!!.issued) return
+        if (job == null || job.issued) return
         val at = ACTION
-        if (frame[at + 3].toInt() != 2 || frame[at + 4].toInt() != job!!.cell) {
+        if (frame[at + 3].toInt() != 2 || frame[at + 4].toInt() != job.cell) {
             finishCapture(job, null, "owner-changed", null)
             return
         }
         if (frame[at + 26] < .5f) {
-            if (System.nanoTime() - job!!.started > 2_000_000_000L) finishCapture(job, null, "pose-latch-not-applied", null) else requestLast()
+            if (System.nanoTime() - job.started > 2_000_000_000L) finishCapture(job, null, "pose-latch-not-applied", null) else requestLast()
             return
         } // Wait for the Rust pose latch, not every animation.
-        job!!.issued = true
-        job!!.snapshot = frame.clone()
-        job!!.crop = Rect(Math.max(0, Math.floor((frame[at + 6] * density).toDouble()).toInt()), Math.max(0, Math.floor((frame[at + 7] * density).toDouble()).toInt()),
+        job.issued = true
+        job.snapshot = frame.clone()
+        job.crop = Rect(Math.max(0, Math.floor((frame[at + 6] * density).toDouble()).toInt()), Math.max(0, Math.floor((frame[at + 7] * density).toDouble()).toInt()),
         Math.min(width, Math.ceil((frame[at + 8] * density).toDouble()).toInt()), Math.min(height, Math.ceil((frame[at + 9] * density).toDouble()).toInt()))
-        job!!.displayCrop = Rect(Math.max(0, Math.floor((frame[at + 6] * displayDensity).toDouble()).toInt()), Math.max(0, Math.floor((frame[at + 7] * displayDensity).toDouble()).toInt()),
+        job.displayCrop = Rect(Math.max(0, Math.floor((frame[at + 6] * displayDensity).toDouble()).toInt()), Math.max(0, Math.floor((frame[at + 7] * displayDensity).toDouble()).toInt()),
         Math.min(viewWidth, Math.ceil((frame[at + 8] * displayDensity).toDouble()).toInt()), Math.min(viewHeight, Math.ceil((frame[at + 9] * displayDensity).toDouble()).toInt()))
         try
         {
-            val w = job!!.crop!!.width()
-            val h = job!!.crop!!.height()
+            val w = job.crop!!.width()
+            val h = job.crop!!.height()
             val pixels = w.toLong() * h
             if (w <= 0 || h <= 0 || pixels > 4_194_304L) throw IllegalStateException("invalid crop " + w + "x" + h)
             if (sceneFbo == 0) throw IllegalStateException("scene target missing")
             val prior = GLES30.glGetError()
             if (prior != GLES30.GL_NO_ERROR) android.util.Log.w("DailyDust", "prior GL error 0x" + Integer.toHexString(prior))
-            job!!.color = renderTexture(w, h, false, false)
-            job!!.fbo = framebuffer(job!!.color, 0)
+            job.color = renderTexture(w, h, false, false)
+            job.fbo = framebuffer(job.color, 0)
             // Recompose the retained scene into a crop-sized target. This is the same final
             // depth/blur composition, without asking a second Surface producer for a buffer.
-            composeTo(job!!.fbo, job!!.crop!!.left, height - job!!.crop!!.bottom)
-            drawLifted(job!!.fbo, job!!.crop!!.left, height - job!!.crop!!.bottom)
+            composeTo(job.fbo, job.crop!!.left, height - job.crop!!.bottom)
+            drawLifted(job.fbo, job.crop!!.left, height - job.crop!!.bottom)
             val id = IntArray(1)
             GLES30.glGenBuffers(1, id, 0)
-            job!!.pbo = id[0]
-            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, job!!.pbo)
+            job.pbo = id[0]
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, job.pbo)
             GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, pixels.toInt() * 4, null, GLES30.GL_STREAM_READ)
             GLES30.glReadBuffer(GLES30.GL_COLOR_ATTACHMENT0)
             GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, 0)
-            job!!.fence = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+            job.fence = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
             GLES30.glFlush()
             val error = GLES30.glGetError()
-            if (error != GLES30.GL_NO_ERROR || job!!.fence == 0L) throw IllegalStateException("readback submit GL=0x" + Integer.toHexString(error))
-            android.util.Log.i("DailyDust", "capture submitted cell=" + job!!.cell + " size=" + w + "x" + h)
+            if (error != GLES30.GL_NO_ERROR || job.fence == 0L) throw IllegalStateException("readback submit GL=0x" + Integer.toHexString(error))
+            android.util.Log.i("DailyDust", "capture submitted cell=" + job.cell + " size=" + w + "x" + h)
         }
         catch (failure:RuntimeException) {
             finishCapture(job, null, "readback-submit", failure)
@@ -652,15 +699,15 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             val status = GLES30.glClientWaitSync(job!!.fence, 0, 0L)
             if (status == GLES30.GL_TIMEOUT_EXPIRED)
             {
-                if (System.nanoTime() - job!!.started > 5_000_000_000L) throw IllegalStateException("GPU readback fence timeout")
+                if (System.nanoTime() - job.started > 5_000_000_000L) throw IllegalStateException("GPU readback fence timeout")
                 worker!!.postDelayed({ pollCapture(job) }, 2L)
                 return
             }
             if (status != GLES30.GL_ALREADY_SIGNALED && status != GLES30.GL_CONDITION_SATISFIED) throw IllegalStateException("GPU readback fence failed")
-            val w = job!!.crop!!.width()
-            val h = job!!.crop!!.height()
+            val w = job.crop!!.width()
+            val h = job.crop!!.height()
             val argb = IntArray(w * h)
-            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, job!!.pbo)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, job.pbo)
             val mapped = GLES30.glMapBufferRange(GLES30.GL_PIXEL_PACK_BUFFER, 0, argb.size * 4, GLES30.GL_MAP_READ_BIT)
             if (!(mapped is ByteBuffer)) throw IllegalStateException("pixel buffer mapping failed")
             val converted:Boolean
@@ -675,15 +722,15 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             }
             if (!converted) throw IllegalStateException("Rust pixel conversion rejected buffer")
             var bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            bitmap!!.setPixels(argb, 0, w, 0, 0, w, h)
-            if (w != job!!.displayCrop!!.width() || h != job!!.displayCrop!!.height())
+            bitmap.setPixels(argb, 0, w, 0, 0, w, h)
+            if (w != job.displayCrop!!.width() || h != job.displayCrop!!.height())
             {
-                val expanded = Bitmap.createScaledBitmap(bitmap, job!!.displayCrop!!.width(), job!!.displayCrop!!.height(), true)
-                if (expanded !== bitmap) bitmap!!.recycle()
+                val expanded = Bitmap.createScaledBitmap(bitmap, job.displayCrop!!.width(), job.displayCrop!!.height(), true)
+                if (expanded !== bitmap) bitmap.recycle()
                 bitmap = expanded
             }
-            job!!.crop = job!!.displayCrop // Dust/caption consumers use physical View pixels.
-            android.util.Log.i("DailyDust", "capture ready cell=" + job!!.cell)
+            job.crop = job.displayCrop // Dust/caption consumers use physical View pixels.
+            android.util.Log.i("DailyDust", "capture ready cell=" + job.cell)
             finishCapture(job, bitmap, null, null)
         }
         catch (failure:RuntimeException) {
@@ -700,23 +747,23 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     private fun finishCapture(job:CaptureRequest?, bitmap:Bitmap?, failure:String?, cause:Throwable?) {
         if (capture == job) capture = null
         if (job!!.fence != 0L) {
-            GLES30.glDeleteSync(job!!.fence)
-            job!!.fence = 0
+            GLES30.glDeleteSync(job.fence)
+            job.fence = 0
         }
-        if (job!!.pbo != 0) {
-            GLES30.glDeleteBuffers(1, intArrayOf(job!!.pbo), 0)
-            job!!.pbo = 0
+        if (job.pbo != 0) {
+            GLES30.glDeleteBuffers(1, intArrayOf(job.pbo), 0)
+            job.pbo = 0
         }
-        if (job!!.fbo != 0) {
-            GLES30.glDeleteFramebuffers(1, intArrayOf(job!!.fbo), 0)
-            job!!.fbo = 0
+        if (job.fbo != 0) {
+            GLES30.glDeleteFramebuffers(1, intArrayOf(job.fbo), 0)
+            job.fbo = 0
         }
-        if (job!!.color != 0) {
-            GLES30.glDeleteTextures(1, intArrayOf(job!!.color), 0)
-            job!!.color = 0
+        if (job.color != 0) {
+            GLES30.glDeleteTextures(1, intArrayOf(job.color), 0)
+            job.color = 0
         }
-        if (failure != null && !failure!!.equals("cancelled") && !failure!!.equals("superseded")) android.util.Log.e("DailyDust", failure + " cell=" + job!!.cell, cause)
-        main.post({ job!!.listener!!.onCaptured(bitmap, job!!.crop, job!!.snapshot, failure) })
+        if (failure != null && !failure.equals("cancelled") && !failure.equals("superseded")) android.util.Log.e("DailyDust", failure + " cell=" + job.cell, cause)
+        main.post({ job.listener!!.onCaptured(bitmap, job.crop, job.snapshot, failure) })
     }
     private fun requestLast() {
         if (!closed) main.post({ if (!closed) listener!!.onDirty() })
@@ -772,7 +819,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             }
             lastMotionStep = now
             sceneFloats!!.position(0)
-            sceneFloats!!.get(frame)
+            sceneFloats.get(frame)
             if (token != dataGeneration) {
                 main.post({ if (!closed && epoch == generation) listener!!.onFrameComplete(null, false) })
                 return
@@ -791,6 +838,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             System.arraycopy(frame, 0, completedFrame, 0, frame.size)
             // Retain the one-in-flight snapshot contract: captions never read a newer scene.
             main.post({ if (!closed && epoch == generation) listener!!.onFrameComplete(if (token == dataGeneration) completedFrame else null, swapped) })
+            scheduleCoverFade()
             beginCapture()
         }
         catch (failure:Exception) {
@@ -820,7 +868,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         if (slot < 0) return -1
         if (previewKeys[slot] != null) previewKeys[slot]!!.preview = -1
         previewKeys[slot] = asset
-        asset!!.preview = slot
+        asset.preview = slot
         previewLoaded[slot] = false
         previewUsed[slot] = ++clock
         return slot
@@ -828,7 +876,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     private fun uploadPreview(slot:Int, image:DailySpatialCovers.Preview?) {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, previewTexture)
         GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, (slot % 32) * TILE, (slot / 32) * TILE, image!!.bitmap)
-        previewColors[slot] = image!!.color
+        previewColors[slot] = image.color
         previewLoaded[slot] = true
     }
     private fun openWindow(floating:Boolean):Boolean {
@@ -846,7 +894,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         if (ready && floating)
         {
             val gl = GLES30.glGetString(GLES30.GL_EXTENSIONS)
-            ready = gl != null && (gl!!.contains("GL_EXT_color_buffer_float") || gl!!.contains("GL_EXT_color_buffer_half_float"))
+            ready = gl != null && (gl.contains("GL_EXT_color_buffer_float") || gl.contains("GL_EXT_color_buffer_half_float"))
             if (ready) {
                 val tex = IntArray(1)
                 val fbo = IntArray(1)
@@ -856,7 +904,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                 GLES30.glGenFramebuffers(1, fbo, 0)
                 GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo[0])
                 GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, tex[0], 0)
-                ready = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) === GLES30.GL_FRAMEBUFFER_COMPLETE
+                ready = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE
                 GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
                 GLES30.glDeleteFramebuffers(1, fbo, 0)
                 GLES30.glDeleteTextures(1, tex, 0)
@@ -880,7 +928,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         if (!EGL14.eglInitialize(display, version, 0, version, 1)) throw IllegalStateException("EGL initialize")
         surface = Surface(owner)
         val extensions = EGL14.eglQueryString(display, EGL14.EGL_EXTENSIONS)
-        val candidate = requestHdr && extensions != null && extensions!!.contains("EGL_EXT_pixel_format_float") && extensions!!.contains("EGL_EXT_gl_colorspace_scrgb_linear")
+        val candidate = requestHdr && extensions != null && extensions.contains("EGL_EXT_pixel_format_float") && extensions.contains("EGL_EXT_gl_colorspace_scrgb_linear")
         hdrSurface = candidate && openWindow(true)
         if (!hdrSurface && !openWindow(false)) throw IllegalStateException("ES3 surface unavailable")
         val hdr = hdrSurface
@@ -901,6 +949,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         AlbumLyricsChip.upload(requireNotNull(context))
         AlbumLyricsChip.configure(program)
         for (name in arrayOf<String>("u_screen", "u_center", "u_radius", "u_pan", "u_zoom", "u_mode", "u_header", "u_scroll", "u_dark", "u_accent", "u_covers", "u_previews", "u_layer", "u_lift_rect", "u_lift_mix", "u_lift_radius", "u_linear_output")) locations.put(name, GLES30.glGetUniformLocation(program, name))
+        locations["u_cover_blend[0]"] = GLES30.glGetUniformLocation(program, "u_cover_blend[0]")
         val ids = IntArray(1)
         GLES30.glGenBuffers(1, ids, 0)
         instanceBuffer = ids[0]
@@ -936,7 +985,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         blurImageLocation = GLES30.glGetUniformLocation(blurProgram, "u_image")
         blurStepLocation = GLES30.glGetUniformLocation(blurProgram, "u_step")
         val samplers = arrayOf<String>("u_scene", "u_depth", "u_soft", "u_far", "u_context_scene")
-        for (i in 0..4) composeSamplers[i] = GLES30.glGetUniformLocation(composeProgram, samplers!![i])
+        for (i in 0..4) composeSamplers[i] = GLES30.glGetUniformLocation(composeProgram, samplers[i])
         composePolicyLocation = GLES30.glGetUniformLocation(composeProgram, "u_depth_policy")
         composeHeightLocation = GLES30.glGetUniformLocation(composeProgram, "u_height")
         composeDarkLocation = GLES30.glGetUniformLocation(composeProgram, "u_dark")
@@ -972,6 +1021,11 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         return shader
     }
     private fun draw(token:Int):Boolean {
+        if (advanceCoverBlend(System.nanoTime())) {
+            drawnRevision = -1f
+            backgroundRevision = -1f
+            rhineContextReady = false
+        }
         val route = if (frame[DailySpatialProtocol.RHINE] > .5f) 1 else 0
         if (route != drawnRoute) {
             drawnRoute = route
@@ -1004,7 +1058,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         val ownerSlot = frame[ACTION + 23].toInt()
         val ownerTrack = if (ownerSlot >= 0 && ownerSlot < count) frame[32 + ownerSlot * 16].toInt() else -1
         val ownerAsset = if (ownerTrack >= 0 && ownerTrack < trackAssets.size) trackAssets.get(ownerTrack) else null
-        val retainedLift = (owner >= 0 && ownerAsset != null && ownerAsset!!.high > 0 && loaded[ownerAsset!!.high] && frame[25] > .5f && backgroundRevision == frame[ACTION + DailySpatialProtocol.WORLD_REVISION]
+        val retainedLift = (owner >= 0 && ownerAsset != null && ownerAsset.high > 0 && loaded[ownerAsset.high] && frame[25] > .5f && backgroundRevision == frame[ACTION + DailySpatialProtocol.WORLD_REVISION]
         && backgroundOwner == owner && backgroundCatalogue == dataGeneration.toLong() && !paletteDirty && packedCount == count)
         if (retainedLift)
         {
@@ -1034,7 +1088,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         }
         ++drawEpoch
         // Keep the prepared landing area resident while the camera traverses intermediate cells.
-        if (artworkPlan != null) for (asset in destinationAssets) if (asset!!.high > 0) pinned[asset!!.high] = drawEpoch
+        if (artworkPlan != null) for (asset in destinationAssets) if (asset.high > 0) pinned[asset.high] = drawEpoch
         val ahead = Math.min(192, frame[22].toInt())
         val aheadStart = 32 + CAPACITY * 16
         if (route == 1)
@@ -1049,15 +1103,15 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             for (n in 0 until count) if(!arrival || frame[32 + n * 16 + 9] > .001f) wantHighTrack(frame[32 + n * 16].toInt())
             highUrls.clear()
             for (asset in visibleHigh) {
-                highUrls.add(asset!!.url)
-                if (asset!!.high > 0) pinned[asset!!.high] = drawEpoch
+                highUrls.add(asset.url)
+                if (asset.high > 0) pinned[asset.high] = drawEpoch
             }
-            covers!!.retainHigh(highUrls)
+            covers.retainHigh(highUrls)
             // Assign all layers before emitting any binding: later priority replacements
             // cannot make an earlier instance sample the wrong album in this frame.
             for (asset in visibleHigh)
             {
-                var slot = asset!!.high
+                var slot = asset.high
                 if (slot == 0)
                 {
                     var oldest = Long.MAX_VALUE
@@ -1073,16 +1127,13 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                         }
                     }
                     if (slot > 0) {
-                        if (keys[slot] != null) keys[slot]!!.high = 0
-                        keys[slot] = asset
-                        asset!!.high = slot
-                        loaded[slot] = false
+                        assignHigh(slot, asset)
                     }
                 }
                 if (slot > 0) {
                     pinned[slot] = drawEpoch
                     used[slot] = ++clock
-                    if (!loaded[slot]) covers!!.request(asset!!.url, true)
+                    if (!loaded[slot]) covers.request(asset.url, true)
                 }
             }
         }
@@ -1093,8 +1144,8 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             val index = frame[if (n < count) 32 + n * 16 else aheadStart + n - count].toInt()
             if (index < 0 || index >= trackAssets.size) continue
             val asset = trackAssets.get(index)
-            if (asset!!.preview >= 0) previewPinned[asset!!.preview] = drawEpoch
-            if (route == 0 && asset!!.high > 0 && (n < count || n - count < 32)) pinned[asset!!.high] = drawEpoch
+            if (asset.preview >= 0) previewPinned[asset.preview] = drawEpoch
+            if (route == 0 && asset.high > 0 && (n < count || n - count < 32)) pinned[asset.high] = drawEpoch
         }
         // Expansion and the existing HWUI cover/bar transition share the GPU. Keep the
         // resident artwork/preview during this handoff; upgrade texture resolution afterwards.
@@ -1104,44 +1155,42 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         var previewUploads = 0
         var pendingUpload = false
         var highSlotsExhausted = false
-        bindingInts!!.clear()
         for (n in 0 until count + ahead)
         {
             val visible = n < count
             val at = 32 + n * 16
             if(arrival && visible && frame[at+9]<=.001f) {
                 // Keep slot alignment, but do not decode, pin or upload cards ahead of the wave.
-                bindingInts!!.put(0).put(0).put(-1).put(0).put(-0xaaaaab)
                 continue
             }
             val index = frame[if (visible) at else aheadStart + n - count].toInt()
             if (index < 0 || index >= tracks.size) {
-                if (visible) bindingInts!!.put(0).put(0).put(-1).put(0).put(-0xaaaaab)
                 continue
             }
             val asset = trackAssets.get(index)
-            val url = asset!!.url
-            var slot = asset!!.high
-            var small = asset!!.preview
-            if (!url!!.isEmpty() && asset!!.resolvedEpoch != drawEpoch)
+            val url = asset.url
+            var slot = asset.high
+            var small = asset.preview
+            if (!url.isEmpty() && asset.resolvedEpoch != drawEpoch)
             {
-                asset!!.resolvedEpoch = drawEpoch
+                asset.resolvedEpoch = drawEpoch
                 small = previewSlot(asset)
                 if (small >= 0)
                 {
                     previewPinned[small] = drawEpoch
                     if (!previewLoaded[small])
                     {
-                        val image = covers!!.preview(url)
+                        val image = covers.preview(url)
                         if (image != null)
                         {
-                            if (previewUploads < 2) {
+                            // Cached visible previews are small enough to admit together on the first frame.
+                            if (visible || previewUploads < 2) {
                                 uploadPreview(small, image)
                                 previewUploads++
                             } else pendingUpload = true
                         }
                         else
-                        covers!!.request(url, false)
+                        covers.request(url, false)
                     }
                 }
                 // High-resolution working set: viewport first, then a small nearby guard ring.
@@ -1174,10 +1223,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                         }
                         if (slot == 0) highSlotsExhausted = true
                         if (slot > 0) {
-                            if (keys[slot] != null) keys[slot]!!.high = 0
-                            keys[slot] = asset
-                            asset!!.high = slot
-                            loaded[slot] = false
+                            assignHigh(slot, asset)
                         }
                     }
                     if (expanding && slot > 0 && !loaded[slot]) pendingUpload = true
@@ -1187,21 +1233,37 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                         pinned[slot] = drawEpoch
                         if (!loaded[slot] && !expanding)
                         {
-                            val pixels = covers!!.full(url)
+                            val pixels = covers.full(url)
                             if (pixels != null)
                             {
-                                if (uploads < highUploadBudget && uploadHigh(slot, pixels)) {
+                                val previewReady = small >= 0 && previewLoaded[small]
+                                if ((previewReady || covers.unavailable(url)) && uploads < highUploadBudget && uploadHigh(slot, pixels)) {
                                     loaded[slot] = true
-                                    covers!!.uploaded(url)
+                                    covers.uploaded(url)
                                     uploads++
                                 } else pendingUpload = true
                             }
-                            else if (!expanding) covers!!.request(url, true)
+                            else if (!expanding) covers.request(url, true)
                         }
                     }
                 }
             }
-            if (visible) bindingInts!!.put(slot).put(if (slot > 0 && loaded[slot]) 1 else 0).put(small).put(if (small >= 0 && previewLoaded[small]) 1 else 0).put(if (small >= 0 && previewLoaded[small]) previewColors[small] else -0xaaaaab)
+        }
+        // Resolve after all slot assignments so an owner promotion cannot leave stale earlier bindings.
+        bindingInts!!.clear()
+        for (n in 0 until count) {
+            val at = 32 + n * 16
+            val index = frame[at].toInt()
+            val asset = trackAssets.getOrNull(index)
+            if (asset == null || (arrival && frame[at + 9] <= .001f)) {
+                bindingInts.put(0).put(0).put(-1).put(0).put(-0xaaaaab)
+                continue
+            }
+            val high = asset.high
+            val small = asset.preview
+            val previewReady = small >= 0 && previewLoaded[small]
+            bindingInts.put(high).put(if (high > 0 && loaded[high]) 1 else 0).put(small)
+                .put(if (previewReady) 1 else 0).put(if (previewReady) previewColors[small] else -0xaaaaab)
         }
         bindingsArrival = arrivalRevision
         bindingsTopology = if (route == 1) topology else -1f
@@ -1260,6 +1322,9 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, 0)
             }
             nextUpload = (slot + 1) % uploadPbos.size
+            coverBlend[layer] = 0f
+            coverBlendStarted[layer] = System.nanoTime()
+            coverFadeActive = true
             return true
         }
         return false
@@ -1298,7 +1363,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             liftLevel = ((packedBatches.ushr(40)) and 3L).toInt()
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceBuffer)
             instances!!.clear()
-            instances!!.limit(count * INSTANCE_FLOATS)
+            instances.limit(count * INSTANCE_FLOATS)
             GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, CAPACITY * INSTANCE_FLOATS * 4, null, GLES30.GL_STREAM_DRAW)
             GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, count * INSTANCE_FLOATS * 4, instances)
             packedCount = count
@@ -1352,20 +1417,21 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             }
 
         }
+        rhineRenderer!!.setCoverBlend(coverBlend)
         val owner = if (frame[ACTION + 27] > .5f) frame[ACTION + 4].toInt() else -1
         val rebuild = warming || backgroundRevision != frame[ACTION + 124] || backgroundOwner != owner || backgroundCatalogue != dataGeneration.toLong()
         sceneBytes!!.putFloat((DailySpatialProtocol.RHINE + 18) * 4, if (dark) 0f else -1f)
-        sceneBytes!!.putFloat((DailySpatialProtocol.RHINE + DailySpatialProtocol.RHINE_HDR_HEADROOM) * 4, if (hdrSurface) hdrHeadroom else 1f)
+        sceneBytes.putFloat((DailySpatialProtocol.RHINE + DailySpatialProtocol.RHINE_HDR_HEADROOM) * 4, if (hdrSurface) hdrHeadroom else 1f)
         if (rebuild)
         {
             // Keep the actual padded target, including its screen-edge/blur guard.
             // Rust filters draw submissions only; full preload, hits and lights stay intact.
             val clip = (DailySpatialProtocol.RHINE + DailySpatialProtocol.RHINE_CLIP_LEFT) * 4
-            sceneBytes!!.putFloat(clip, -scenePadX / density)
-            sceneBytes!!.putFloat(clip + 4, -scenePadY / density)
-            sceneBytes!!.putFloat(clip + 8, (width + scenePadX) / density)
-            sceneBytes!!.putFloat(clip + 12, (height + scenePadY) / density)
-            sceneBytes!!.putFloat((DailySpatialProtocol.RHINE + DailySpatialProtocol.RHINE_CLIP_ENABLED) * 4, 1f)
+            sceneBytes.putFloat(clip, -scenePadX / density)
+            sceneBytes.putFloat(clip + 4, -scenePadY / density)
+            sceneBytes.putFloat(clip + 8, (width + scenePadX) / density)
+            sceneBytes.putFloat(clip + 12, (height + scenePadY) / density)
+            sceneBytes.putFloat((DailySpatialProtocol.RHINE + DailySpatialProtocol.RHINE_CLIP_ENABLED) * 4, 1f)
             val changed:Boolean
             android.os.Trace.beginSection("Daily.RustLightPack")
             try
@@ -1411,6 +1477,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     }
     private fun bindWall() {
         GLES30.glUseProgram(program)
+        GLES30.glUniform4fv(locations.getValue("u_cover_blend[0]"), coverBlend.size / 4, coverBlend, 0)
         GLES30.glUniform1f(locations.getValue("u_linear_output"), (0).toFloat())
         GLES30.glUniform2f(locations.getValue("u_screen"), width / density, height / density)
         GLES30.glUniform2f(locations.getValue("u_center"), frame[7], frame[8])
@@ -1469,41 +1536,41 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             {
                 if (!SpatialNative.dailySpatialStep(warmState, .25f, width / density, height / density, (sceneBytes)!!)) throw IllegalStateException("Daily warm scene failed")
                 sceneFloats!!.position(0)
-                sceneFloats!!.get(frame)
+                sceneFloats.get(frame)
                 frame[1] = phase * .5f
-                sceneBytes!!.putFloat(4, frame[1])
+                sceneBytes.putFloat(4, frame[1])
                 // A one-song catalogue now repeats spatially; warm just the nearest instance.
                 frame[16] = 1f
-                sceneBytes!!.putFloat(16 * 4, 1f)
+                sceneBytes.putFloat(16 * 4, 1f)
                 bindingInts!!.clear()
-                bindingInts!!.put(0).put(if (phase == 0) 1 else 0).put(0).put(if (phase == 1) 1 else 0).put(-0xac9480)
+                bindingInts.put(0).put(if (phase == 0) 1 else 0).put(0).put(if (phase == 1) 1 else 0).put(-0xac9480)
                 frame[DailySpatialProtocol.RHINE] = 0f
-                sceneBytes!!.putFloat(DailySpatialProtocol.RHINE * 4, (0).toFloat())
+                sceneBytes.putFloat(DailySpatialProtocol.RHINE * 4, (0).toFloat())
                 renderScene(1, true)
             }
             // Establish the portrait visible set before targeting its long-press owner.
             SpatialNative.dailySpatialStep(warmState, (0).toFloat(), Math.min(width, height) / density, Math.max(width, height) / density, (sceneBytes)!!)
             sceneFloats!!.position(0)
-            sceneFloats!!.get(frame)
+            sceneFloats.get(frame)
             SpatialNative.dailySpatialCommand(warmState, 15, frame[39].toInt(), (0).toFloat(), (0).toFloat())
-            SpatialNative.dailySpatialStep(warmState, .25f, Math.min(width, height) / density, Math.max(width, height) / density, (sceneBytes)!!)
-            sceneFloats!!.position(0)
-            sceneFloats!!.get(frame)
+            SpatialNative.dailySpatialStep(warmState, .25f, Math.min(width, height) / density, Math.max(width, height) / density, (sceneBytes))
+            sceneFloats.position(0)
+            sceneFloats.get(frame)
             frame[16] = 1f
-            sceneBytes!!.putFloat(16 * 4, 1f)
+            sceneBytes.putFloat(16 * 4, 1f)
             bindingInts!!.clear()
-            bindingInts!!.put(0).put(1).put(0).put(1).put(-0xac9480)
+            bindingInts.put(0).put(1).put(0).put(1).put(-0xac9480)
             frame[ACTION + 27] = 0f
-            sceneBytes!!.putFloat((ACTION + 27) * 4, (0).toFloat())
+            sceneBytes.putFloat((ACTION + 27) * 4, (0).toFloat())
             renderScene(1, true)
             frame[ACTION + 27] = 1f
             frame[ACTION + 23] = 0f
-            sceneBytes!!.putFloat((ACTION + 27) * 4, (1).toFloat())
-            sceneBytes!!.putFloat((ACTION + 23) * 4, (0).toFloat())
+            sceneBytes.putFloat((ACTION + 27) * 4, (1).toFloat())
+            sceneBytes.putFloat((ACTION + 23) * 4, (0).toFloat())
             renderScene(1, true)
             if (width >= height) {
                 frame[DailySpatialProtocol.RHINE] = 0f
-                sceneBytes!!.putFloat(DailySpatialProtocol.RHINE * 4, (0).toFloat())
+                sceneBytes.putFloat(DailySpatialProtocol.RHINE * 4, (0).toFloat())
                 renderScene(1, true)
             }
         }
@@ -1542,7 +1609,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         texturesReady = true
         main.post({ if (!closed && epoch == generation) {
                 listener!!.onReady()
-                listener!!.onDirty()
+                listener.onDirty()
             } })
     }
     private fun createMesh(level:Int, divisions:Int) {
@@ -1559,16 +1626,16 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             val b = a + 1
             val c = a + divisions + 1
             val d = c + 1
-            indices!!.put(a.toShort()).put(b.toShort()).put(c.toShort()).put(c.toShort()).put(b.toShort()).put(d.toShort())
+            indices.put(a.toShort()).put(b.toShort()).put(c.toShort()).put(c.toShort()).put(b.toShort()).put(d.toShort())
         }
-        indices!!.flip()
+        indices.flip()
         val id = IntArray(1)
         GLES30.glGenVertexArrays(1, id, 0)
         meshVaos[level] = id[0]
         GLES30.glBindVertexArray(id[0])
         GLES30.glGenBuffers(1, id, 0)
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, id[0])
-        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, mesh!!.remaining() * 4, mesh, GLES30.GL_STATIC_DRAW)
+        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, mesh.remaining() * 4, mesh, GLES30.GL_STATIC_DRAW)
         GLES30.glEnableVertexAttribArray(0)
         GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 8, 0)
         GLES30.glGenBuffers(1, id, 0)
@@ -1613,7 +1680,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, id[0])
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, color, 0)
         if (depth != 0) GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_DEPTH_ATTACHMENT, GLES30.GL_TEXTURE_2D, depth, 0)
-        if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) !== GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Daily depth framebuffer incomplete")
+        if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Daily depth framebuffer incomplete")
         return id[0]
     }
     private fun ensureSceneTargets() {
@@ -1790,6 +1857,8 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         if (capture != null) finishCapture(capture, null, "surface-destroyed", null)
         generation++
         worker!!.removeCallbacks(uploadRetry)
+        worker.removeCallbacks(coverFade)
+        coverFadePosted = false
         uploadRetryPosted = false
         java.util.Arrays.fill(uploadPbos, 0)
         java.util.Arrays.fill(uploadFences, 0)
@@ -1841,6 +1910,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     }
 
     companion object {
+        private const val COVER_FADE_NANOS = 220_000_000L
         private val CAPACITY:Int = DailySpatialProtocol.SLOTS
         private val HIGH:Int = 96
         private val SIZE:Int = DailySpatialCovers.SIZE

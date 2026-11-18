@@ -22,6 +22,8 @@ pub(crate) struct Input {
     pub token: u64,
     pub track: LibraryTrack,
     pub lyrics: Option<Arc<Lyrics>>,
+    pub lyrics_failed: bool,
+    pub position: f64,
     pub clock: Option<folia_player::PlaybackClock>,
 }
 
@@ -226,11 +228,11 @@ impl Poster {
         }
         let Some(lyrics) = &input.lyrics else {
             self.events.clear();
-            return Ok(0);
+            return Ok(if input.lyrics_failed { 5 } else { 0 });
         };
         let size = viewport.logical_size();
         let track = &input.track;
-        let time = input.clock.as_ref().map_or(0., |clock| clock.position());
+        let time = input.clock.as_ref().map_or(input.position, |clock| clock.position());
         if self.custom.is_none() && size.width >= 768. && self.retry_cover.is_some_and(|retry| retry <= Instant::now())
         {
             match app.covers.playback(track.path.clone(), track.cover_url.clone()) {
@@ -427,6 +429,7 @@ impl FoliaBridge {
 
     /// Bind string identities once on the owning render thread. Vsync uses a primitive JNI call.
     pub fn select_monet(self: Arc<Self>, track_id: i64, provider: String, online_id: String) {
+        self.playback.request_lyrics(track_id, provider.clone(), online_id.clone(), false);
         POSTER.with_borrow_mut(|poster| {
             if let Some(p) = poster {
                 p.ticker_lyrics = None;
@@ -435,6 +438,10 @@ impl FoliaBridge {
                 p.session = Some((self, track_id, provider, online_id));
             }
         });
+    }
+
+    pub fn retry_monet_lyrics(&self, track_id: i64, provider: String, online_id: String) {
+        self.playback.request_lyrics(track_id, provider, online_id, true);
     }
 }
 

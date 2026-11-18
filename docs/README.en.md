@@ -59,7 +59,7 @@ Folia-rust rewrote Folia from Electron into a native program. Folia-rust-android
 | Bridge | UniFFI 0.32.2 (app and lyric data), JNI (context, Surface, frames, input and animation kernels) |
 | Lyric rendering | TextureView + wgpu 27 / iced sub-crates / WGSL, native Canvas/Skia text |
 | Core | Rust 1.99.1, Folia-rust crates |
-| Build | Gradle 9.8.2 + AGP 9.3.0, cargo-ndk 4.1.2, NDK 29.0.14206865 |
+| Build | Gradle 9.8.2 + AGP 9.5.1, cargo-ndk 4.1.2, NDK 29.0.14206865 |
 | System versions | minSdk 26 (Android 8.0) / targetSdk 36 / compileSdk 37, arm64-v8a |
 
 ## How the lyrics page works
@@ -105,6 +105,8 @@ On macOS/Linux, use `./gradlew assembleRelease`. For a debug build, change the t
 ## License
 
 [GNU Affero General Public License v3.0](../LICENSE) (`AGPL-3.0-only`).
+
+Platform icons are reused from Folia-rust and are trademarks of their respective owners. They identify the corresponding services and are not covered by AGPL-3.0.
 
 Folia-rust-android reuses and ports crates from [Folia-rust](https://github.com/Techuouo520/Folia-rust) (AGPL-3.0-only), which is itself a derivative of [folia-major](https://github.com/chthollyphile/folia-major) (AGPL-3.0), so this project is released under AGPL-3.0 as well. Copyright of the original project belongs to its authors. Whenever you distribute the APK (test builds included), recipients must be able to obtain the complete corresponding source code.
 

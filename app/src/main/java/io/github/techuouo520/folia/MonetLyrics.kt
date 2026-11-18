@@ -11,6 +11,7 @@ import android.view.ViewConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,15 +26,26 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.github.techuouo520.folia.bridge.FoliaBridge
 import io.github.techuouo520.folia.bridge.PlaybackSnapshot
 import io.github.techuouo520.folia.bridge.TransportState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 @Composable
 internal fun MonetLyrics(bridge: FoliaBridge, playback: PlaybackSnapshot, dark: Boolean,
-    selected: Boolean, radio: Boolean = false, active: Boolean = true) {
+    selected: Boolean, radio: Boolean = false, active: Boolean = true,
+    controlsVisible: Boolean = true, onStatus: (Int) -> Unit = {}) {
     val identity = playback.artSource()?.owner
-    val previousQueue = remember { playback.queueGeneration }
+    val radioOwner by produceState<ArtworkOwner?>(null, bridge, radio, identity, playback.queueGeneration) {
+        value = null
+        if (radio && identity != null) {
+            val matches = withContext(Dispatchers.IO) {
+                runCatching { bridge.personalFm().any { it.artOwner() == identity } }.getOrDefault(false)
+            }
+            if (matches) value = identity
+        }
+    }
     var admitted by remember { mutableStateOf(false) }
-    val show = admitted || selected || (radio && playback.queueGeneration != previousQueue)
+    val show = admitted || selected || (radio && identity != null && radioOwner == identity)
     LaunchedEffect(show) { if (show) admitted = true }
     val source = identity.takeIf { show }
     var status by remember(source, dark) { mutableIntStateOf(0) }
@@ -41,24 +53,33 @@ internal fun MonetLyrics(bridge: FoliaBridge, playback: PlaybackSnapshot, dark: 
     val context = LocalContext.current
     val rendering = active && !LocalPlayerCoversPage.current
     val settings = remember(context) { MonetPreferences(context) }
+    var posterView by remember { mutableStateOf<MonetPosterView?>(null) }
     Box(Modifier.fillMaxSize().background(ground)) {
-        AndroidView(factory = { MonetPosterView(it, bridge) }, modifier = Modifier.fillMaxSize(),
-            onRelease = { it.release() }, update = {
+        AndroidView(factory = { MonetPosterView(it, bridge).also { view -> posterView = view } }, modifier = Modifier.fillMaxSize(),
+            onRelease = { if (posterView === it) posterView = null; it.release() }, update = {
                 it.poster.onPortraitOffset = { x -> settings.update(settings.value.copy(portraitOffset = x)) }
-                it.report = { result -> status = result }
+                it.report = { result -> status = result; onStatus(result) }
                 it.update(source, playback, dark, settings.value, rendering)
             })
-        if (status != 1) {
-            val background = if (status == 2) Color.Transparent else ground
+        if (source == null || status != 1) {
+            val background = if (source != null && status == 2) Color.Transparent else ground
             Box(Modifier.fillMaxSize().background(background), contentAlignment = Alignment.Center) {
-                Text(when (status) {
-                    2 -> "暂无歌词"
-                    3 -> "歌词画面暂时无法显示"
-                    else -> "正在获取歌词.."
-                }, color = if (dark) Color(0xFFB8B8BD) else Color(0xFF625C56), fontSize = 15.sp)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(when {
+                        source == null -> bridge.t("ui.noTrack")
+                        status == 2 -> bridge.t("ui.noLyricsAvailable")
+                        status == 3 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("ui.visualizer"))
+                        status == 5 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("localMusic.lyrics"))
+                        else -> bridge.t("home.loading")
+                    }, color = if (dark) Color(0xFFB8B8BD) else Color(0xFF625C56), fontSize = 15.sp)
+                    if (source != null && (status == 3 || status == 5)) {
+                        TextButton(onClick = { posterView?.retryLyrics() }) { Text(bridge.t("search.retry")) }
+                    }
+                }
             }
         }
-        MonetMenu(settings, dark)
+        if (controlsVisible && rendering && source != null && (status == 1 || status == 2)) SponsorFooter(bridge)
+        if (controlsVisible) MonetMenu(settings, dark)
     }
 }
 
@@ -82,6 +103,7 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     // Everything below belongs to this surface's Looper, including its vsync registration.
     private val clock by lazy { Choreographer.getInstance() }
     private var ready = false
+    private var tickerReady = false
     private var visible = false
     private var scene: Scene? = null
     private var workerSongGeneration = 0L
@@ -131,6 +153,10 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     }
 
     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+        attachSurface(texture, width, height, false)
+    }
+
+    private fun attachSurface(texture: SurfaceTexture, width: Int, height: Int, retryLyrics: Boolean) {
         if (disposed) return
         val id = ++serial
         val surface = Surface(texture)
@@ -143,12 +169,26 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
             surfaceWidth = width
             surfaceHeight = height
             visible = shown
-            ready = try { attach(surface) } finally { surface.release() }
-            if (ready) {
-                bridge.installMonetMaskFilter(MonetGlyphBlur())
-                wake()
-            } else post { if (serial == id && !disposed) report(3) }
+            ready = try {
+                stopSurface()
+                if (retryLyrics) {
+                    scene?.song?.let { bridge.retryMonetLyrics(it.id, it.provider, it.song) }
+                }
+                if (attach(surface)) {
+                    bridge.installMonetMaskFilter(MonetGlyphBlur())
+                    true
+                } else false
+            } catch (error: Exception) {
+                android.util.Log.e("FoliaMonet", "Could not prepare lyrics surface", error)
+                false
+            } finally { surface.release() }
+            if (ready) wake() else post { if (serial == id && !disposed) report(3) }
         }
+    }
+
+    fun retryLyrics() {
+        val texture = surfaceTexture ?: return
+        attachSurface(texture, width, height, true)
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
@@ -182,6 +222,15 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
         queued = true
         delayed = delay > 0
         clock.postFrameCallbackDelayed(vsync, delay)
+    }
+
+    fun setTickerReady(ready: Boolean) {
+        worker.post {
+            if (tickerReady != ready) {
+                tickerReady = ready
+                wake()
+            }
+        }
     }
 
     private fun render() {
@@ -219,8 +268,9 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
             }
         }
         schedule(when {
-            status == 3 -> 1000L
+            status == 3 || status == 5 -> 1000L
             status == 0 -> 80L
+            status == 1 && !tickerReady -> 80L
             !current.playing && SystemClock.uptimeMillis() > interactiveUntil -> 80L
             else -> 0L
         })

@@ -69,6 +69,7 @@ impl State {
    distance(a.1).total_cmp(&distance(b.1))
   }).map(|v|v.0).unwrap_or_else(||if self.action_cell==Some(song){song+self.count.max(1)}else{song})
  }
+ #[cfg(test)]
  fn hit(&self,x:f32,y:f32)->i32{
   hit_geometry(self.mode.value,self.x.value,self.y.value,self.zoom.value,self.width,self.height,self.camera().1,&self.visible,x,y)
  }

@@ -38,7 +38,7 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
         page.tracks.mapIndexed { index,track ->
             // Duplicate tracks keep distinct cells and the original queue position.
             SpatialItem("$index:${identity(track)}",track.title,track.artist,
-                "collection-cover:${track.path}:${track.coverUrl.ifBlank {fallbackCover}}",track.path) to index
+                SpatialCoverSource.key(track.path,track.coverUrl.ifBlank {fallbackCover}),track.path) to index
         }.toMap()
     }
     val visible=remember(catalogue,hidden) { catalogue.keys.filter { identity(page.tracks[catalogue.getValue(it)]) !in hidden } }
@@ -49,7 +49,7 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
         val track=coverIndices.value[coverKey]?.let { tracks.value.getOrNull(it) }
         if(track==null) null else {
             val url=track.coverUrl.ifBlank { fallbackCover }
-            val requestKey="collection-original:${track.path}:$url"
+            val requestKey="spatial-original:${SpatialCoverSource.version(coverKey)}"
             bridge.requestCovers(listOf(CoverAsk(requestKey,track.path,url,1536,1536)))
             val until=System.nanoTime()+8_000_000_000L
             var bytes: ByteArray?=null
@@ -64,6 +64,10 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
         }
     } }
     var albumVisible by remember(key) { mutableStateOf(false) }
+    val entry = LocalCollectionEntry.current
+    SideEffect {
+        if (visible.isEmpty() && !page.loading) entry?.sceneReady = true
+    }
     val playback=shell.playback
     val playingKey=remember(visible,catalogue,playback.provider,playback.onlineId,playback.trackId) {
         visible.firstOrNull { cell ->
@@ -84,6 +88,7 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
             items=visible,dark=dark,playingKey=playingKey,playing=playback.state==TransportState.PLAYING,
             source=source,initialStyle=style,chrome=false,expansionComplete=expanded,interactive=interactive,sceneActive=active,bottomInset=bottomInset,
             onFramePresented={titleBackdrop.sourceFramePresented();onFramePresented()},
+            onSceneReady={ entry?.sceneReady = true },
             onPlay={ cell -> indices.value[cell.key]?.let {onPlay(tracks.value,it)} },onToggle=onToggle,
             onNext={ cell -> indices.value[cell.key]?.let {index -> action {bridge.enqueueNext(listOf(tracks.value[index]))} } },
             isFavorite={ cell -> identity(page.tracks[catalogue.getValue(cell)]) in favorites },

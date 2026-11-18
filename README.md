@@ -59,7 +59,7 @@ Folia-rust 把 Folia 从 Electron 重写成了原生程序。Folia-rust-android 
 | 桥接 | UniFFI 0.32.2（业务与歌词数据），JNI（上下文、Surface、逐帧渲染、输入和动画内核） |
 | 歌词渲染 | TextureView + wgpu 27 / iced 子 crate / WGSL，原生 Canvas/Skia 文字 |
 | 核心 | Rust 1.99.1，Folia-rust 的 crate |
-| 构建 | Gradle 9.8.2 + AGP 9.3.0，cargo-ndk 4.1.2，NDK 29.0.14206865 |
+| 构建 | Gradle 9.8.2 + AGP 9.5.1，cargo-ndk 4.1.2，NDK 29.0.14206865 |
 | 系统版本 | minSdk 26（Android 8.0）/ targetSdk 36 / compileSdk 37，arm64-v8a |
 
 ## 歌词效果页如何工作
@@ -105,6 +105,8 @@ macOS/Linux 使用 `./gradlew assembleRelease`。调试构建将任务改为 `as
 ## 许可证
 
 [GNU Affero General Public License v3.0](LICENSE)（`AGPL-3.0-only`）。
+
+平台图标复用自 Folia-rust，属于各平台的商标，仅用于标识对应平台，不在 AGPL-3.0 授权范围内。
 
 Folia-rust-android 复用并移植了 [Folia-rust](https://github.com/Techuouo520/Folia-rust)（AGPL-3.0-only）的 crate，Folia-rust 又是 [folia-major](https://github.com/chthollyphile/folia-major)（AGPL-3.0）的衍生作品，因此本项目同样以 AGPL-3.0 发布，原项目的版权归其作者所有。分发 APK（包括发给他人的测试版）时，需要同时让接收者能获得对应的完整源代码。
 

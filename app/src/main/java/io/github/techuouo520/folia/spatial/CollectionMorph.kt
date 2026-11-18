@@ -23,7 +23,7 @@ internal object CollectionMorph {
         out[CLIP_HEIGHT]=fh/start+(h-fh/start)*p
         out[RADIUS]=radius/start*(1-p)
         out[CONTENT_ALPHA]=smooth(.18f,.70f,p)
-        out[ORIGIN_ALPHA]=1-smooth(.05f,.42f,p)
+        out[ORIGIN_ALPHA]=1-out[CONTENT_ALPHA]
         out[UNDER_ALPHA]=underAlpha(p)
     }
     fun underAlpha(progress: Float)=1-.5f*smooth(.25f,1f,progress)

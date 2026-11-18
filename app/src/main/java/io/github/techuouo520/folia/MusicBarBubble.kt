@@ -189,6 +189,8 @@ internal fun MusicBarBubble(
                 onPrevious = { interaction++; action { bridge.previous() } },
                 onToggle = { interaction++; onToggle() },
                 onNext = { interaction++; action { bridge.next() } },
+                onOpenLyrics = { navigation?.openPlayerLyrics(); onExpanded(false) },
+                lyricsLabel = bridge.t("localMusic.lyrics"),
                 modifier = Modifier.musicBarIdleTimeout(expanded && !pressed && !seekHeld, interaction) { onExpanded(false) }
                     .then(recover).onSizeChanged { panelHeight = with(density) { it.height.toDp() } },
             )
@@ -235,6 +237,7 @@ private fun RecordSleeve() {
 private fun BubblePlayerPanel(
     playback: PlaybackSnapshot, cover: ImageBitmap?, motion: CornerMotion, frame: State<Int>, enabled: Boolean,
     onFold: () -> Unit, onPrevious: () -> Unit, onToggle: () -> Unit, onNext: () -> Unit, modifier: Modifier,
+    onOpenLyrics: () -> Unit, lyricsLabel: String,
 ) {
     val colors = MaterialTheme.colorScheme
     val playing = playback.state == TransportState.PLAYING
@@ -260,9 +263,13 @@ private fun BubblePlayerPanel(
             }
         }
         HandedTransportRow(motion, frame, preview = { clip ->
-            Text(if (hasTrack) playback.currentLyric ?: "暂无歌词" else "", clip,
-                color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Box(clip.heightIn(min = 48.dp).clickable(enabled = enabled && hasTrack,
+                role = Role.Button, onClickLabel = lyricsLabel, onClick = onOpenLyrics),
+                contentAlignment = Alignment.CenterStart) {
+                Text(if (hasTrack) playback.currentLyric ?: "暂无歌词" else "",
+                    color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }) {
             PlayerTransport(R.drawable.salam_transport_previous_icon, "上一首", enabled && playback.hasPrevious,
                 onPrevious, Modifier.size(48.dp), direction = -1, compactWeight = 1f,
@@ -328,7 +335,7 @@ private fun HandedTransportRow(motion: CornerMotion, frame: State<Int>,
         val height = maxOf(lyric.height, buttons.height)
         layout(width, height) {
             val right = side()
-            buttons.place((travel * right).roundToInt(), (height - buttons.height) / 2)
+            buttons.place((travel * right).roundToInt(), (height - buttons.height) / 2, zIndex = 1f)
             lyric.placeWithLayer(if (right >= .5f) 0 else width - lyric.width, (height - lyric.height) / 2) {
                 alpha = cornerSmooth(kotlin.math.abs(2f * side() - 1f))
             }

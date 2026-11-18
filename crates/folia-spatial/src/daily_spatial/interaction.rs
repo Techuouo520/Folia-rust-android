@@ -35,6 +35,7 @@ impl State{
  pub(super) fn update_lift_layout(&mut self){
   if let Some(cell)=self.action_cell{self.lift_placement=placement(self.lift_origin,self.action_base(cell),self.width,self.height);}
  }
+ #[cfg(test)]
  pub(super) fn lift_point(&self,x:f32,y:f32)->(f32,f32){
   let(cx,cy)=self.project(x,y);let Some(cell)=self.action_cell else{return(cx,cy)};
   self.lift_point_in(self.action_base(cell),x,y)

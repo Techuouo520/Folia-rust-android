@@ -1,7 +1,9 @@
 // Online music on a tokio runtime. Callers start a job and poll; nothing here blocks them.
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use folia_core::{AudioQuality, Lyrics, OnlineId, Track};
 use folia_omni::{
@@ -76,6 +78,7 @@ impl<T> Default for Slot<T> {
 
 struct State {
     login_generation: u64,
+    login_task: Option<tokio::task::AbortHandle>,
     login: LoginView,
     session: SessionView,
     search_generation: u64,
@@ -92,6 +95,7 @@ impl State {
     fn new() -> Self {
         Self {
             login_generation: 0,
+            login_task: None,
             login: LoginView { phase: LoginPhase::Idle, width: 0, modules: Vec::new(), message: String::new() },
             session: SessionView {
                 phase: SessionPhase::Resolving,
@@ -123,6 +127,7 @@ pub(crate) struct OnlineHost {
     omni: Omni,
     runtime: tokio::runtime::Runtime,
     state: Arc<Mutex<State>>,
+    login_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl OnlineHost {
@@ -134,7 +139,10 @@ impl OnlineHost {
             })?;
         let omni = Omni::new(cache.to_owned(), "Folia".to_owned()).map_err(online_err)?;
         tracing::info!(providers = omni.providers().len(), "online runtime ready");
-        Ok(Self { omni, runtime, state: Arc::new(Mutex::new(State::new())) })
+        Ok(Self {
+            omni, runtime, state: Arc::new(Mutex::new(State::new())),
+            login_gate: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     pub(crate) fn cover_fetcher(&self) -> Arc<CoverFn> {
@@ -166,7 +174,12 @@ impl OnlineHost {
         Arc::new(move |provider: &str, song: &str| {
             let omni = omni.clone();
             let song = OnlineId { provider: provider.to_owned(), id: song.to_owned() };
-            handle.block_on(async move { omni.lyrics(&song).await.map_err(|error| error.to_string()) })
+            handle.block_on(async move {
+                tokio::time::timeout(std::time::Duration::from_secs(30), omni.lyrics(&song))
+                    .await
+                    .map_err(|_| "lyrics request timed out".to_owned())?
+                    .map_err(|error| error.to_string())
+            })
         })
     }
 
@@ -226,97 +239,128 @@ impl OnlineHost {
     }
 
     pub(crate) fn begin_login(&self, provider: &str) {
-        let generation = {
-            let mut guard = self.state.lock();
-            guard.login_generation = guard.login_generation.wrapping_add(1);
-            guard.login =
-                LoginView { phase: LoginPhase::Loading, width: 0, modules: Vec::new(), message: String::new() };
-            guard.login_generation
-        };
+        let mut guard = self.state.lock();
+        guard.login_generation = guard.login_generation.wrapping_add(1);
+        if let Some(previous) = guard.login_task.take() {
+            previous.abort();
+        }
+        guard.login = LoginView { phase: LoginPhase::Loading, width: 0, modules: Vec::new(), message: String::new() };
+        let generation = guard.login_generation;
         let omni = self.omni.clone();
         let state = Arc::clone(&self.state);
+        let gate = Arc::clone(&self.login_gate);
         let provider = provider.to_owned();
-        self.runtime.spawn(async move {
-            let qr = match omni.login_qr(&provider).await {
-                Ok(qr) => qr,
-                Err(error) => {
-                    fail_login(&state, generation, &error);
+        let task = self.runtime.spawn(async move {
+            // Hold the gate until the old future and its subscription have both been dropped.
+            // An old round's cleanup must never cancel a newer QQ subscription.
+            let exclusive = match tokio::time::timeout(Duration::from_secs(30), gate.lock_owned()).await {
+                Ok(guard) => Arc::new(guard),
+                Err(_) => {
+                    fail_login_message(&state, generation, "previous sign-in request is still finishing".to_owned());
                     return;
                 }
             };
             if !current(&state, generation) {
                 return;
             }
-            store_qr(&state, &qr);
+            let round = LoginRound { omni: omni.clone(), provider: provider.clone(), exclusive };
+            let Some(qr) = login_request(&state, generation, 30, omni.login_qr(&provider)).await else { return };
+            if !store_qr(&state, generation, &qr) {
+                return;
+            }
             loop {
                 if !current(&state, generation) {
                     return;
                 }
-                let state_now = match omni.check_login(&provider, &qr.key).await {
-                    Ok(state_now) => state_now,
-                    Err(error) => {
-                        fail_login(&state, generation, &error);
-                        return;
-                    }
-                };
+                let Some(state_now) = login_request(&state, generation, 15, omni.check_login(&provider, &qr.key)).await
+                else { return };
                 if !current(&state, generation) {
                     return;
                 }
                 match state_now {
-                    LoginState::Waiting => state.lock().login.phase = LoginPhase::Waiting,
-                    LoginState::Scanned => state.lock().login.phase = LoginPhase::Scanned,
+                    LoginState::Waiting => {
+                        if !update_login(&state, generation, |guard| guard.login.phase = LoginPhase::Waiting) {
+                            return;
+                        }
+                    }
+                    LoginState::Scanned => {
+                        if !update_login(&state, generation, |guard| guard.login.phase = LoginPhase::Scanned) {
+                            return;
+                        }
+                    }
                     LoginState::Confirmed => {
-                        match blocking(omni.clone(), {
+                        let saving = blocking(omni.clone(), {
                             let provider = provider.clone();
-                            move |omni| omni.save_session(&provider)
-                        })
-                        .await
-                        {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => {
+                            let state = Arc::clone(&state);
+                            let exclusive = Arc::clone(&round.exclusive);
+                            move |omni| {
+                                // Blocking keyring calls cannot be aborted. Keep later login rounds
+                                // behind this save even if the awaiting UI request is cancelled.
+                                let _exclusive = exclusive;
+                                if !current(&state, generation) {
+                                    return Ok(false);
+                                }
+                                omni.save_session(&provider).map(|()| true)
+                            }
+                        });
+                        match tokio::time::timeout(Duration::from_secs(30), saving).await {
+                            Ok(Ok(Ok(true))) => {}
+                            Ok(Ok(Ok(false))) => return,
+                            Ok(Ok(Err(error))) => {
                                 fail_login(&state, generation, &error);
                                 return;
                             }
-                            Err(()) => {
-                                let mut guard = state.lock();
-                                if guard.login_generation == generation {
-                                    guard.login.phase = LoginPhase::Failed;
-                                    guard.login.message = "keyring".to_owned();
-                                }
+                            Ok(Err(())) => {
+                                fail_login_message(&state, generation, "keyring".to_owned());
+                                return;
+                            }
+                            Err(_) => {
+                                fail_login_message(&state, generation, "saving sign-in session timed out".to_owned());
                                 return;
                             }
                         }
-                        match omni.account(&provider).await {
-                            Ok(Some(account)) => {
-                                let mut guard = state.lock();
-                                guard.session = session_in(&provider, &account);
-                                guard.login.phase = LoginPhase::Confirmed;
-                                guard.login.message = account.nickname.clone();
-                                tracing::info!(provider = %provider, user = %account.id, "signed in");
+                        if !current(&state, generation) {
+                            return;
+                        }
+                        match login_request(&state, generation, 30, omni.account(&provider)).await {
+                            Some(Some(account)) => {
+                                if update_login(&state, generation, |guard| {
+                                    guard.session = session_in(&provider, &account);
+                                    guard.login.phase = LoginPhase::Confirmed;
+                                    guard.login.message = account.nickname.clone();
+                                }) {
+                                    tracing::info!(provider = %provider, user = %account.id, "signed in");
+                                }
                             }
-                            Ok(None) => {
-                                let mut guard = state.lock();
-                                guard.login.phase = LoginPhase::Failed;
-                                guard.login.message = "account".to_owned();
+                            Some(None) => {
+                                fail_login_message(&state, generation, "account".to_owned());
                             }
-                            Err(error) => fail_login(&state, generation, &error),
+                            None => {}
                         }
                         return;
                     }
                     LoginState::Expired => {
-                        state.lock().login.phase = LoginPhase::Expired;
+                        update_login(&state, generation, |guard| guard.login.phase = LoginPhase::Expired);
                         return;
                     }
                     LoginState::Failed { message, .. } => {
-                        let mut guard = state.lock();
-                        guard.login.phase = LoginPhase::Failed;
-                        guard.login.message = message.unwrap_or_default();
+                        fail_login_message(&state, generation, message.unwrap_or_default());
                         return;
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
+        guard.login_task = Some(task.abort_handle());
+    }
+
+    pub(crate) fn cancel_login(&self) {
+        let mut guard = self.state.lock();
+        guard.login_generation = guard.login_generation.wrapping_add(1);
+        if let Some(task) = guard.login_task.take() {
+            task.abort();
+        }
+        guard.login = LoginView { phase: LoginPhase::Idle, width: 0, modules: Vec::new(), message: String::new() };
     }
 
     pub(crate) fn login(&self) -> LoginView {
@@ -328,6 +372,7 @@ impl OnlineHost {
     }
 
     pub(crate) fn begin_logout(&self) {
+        self.cancel_login();
         let provider = self.state.lock().session.provider.clone();
         if provider.is_empty() {
             self.state.lock().session = signed_out();
@@ -646,22 +691,67 @@ fn current(state: &Mutex<State>, generation: u64) -> bool {
     state.lock().login_generation == generation
 }
 
-fn store_qr(state: &Mutex<State>, qr: &LoginQr) {
+struct LoginRound {
+    omni: Omni,
+    provider: String,
+    exclusive: Arc<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for LoginRound {
+    fn drop(&mut self) {
+        if let Err(error) = self.omni.cancel_login(&self.provider) {
+            tracing::warn!(provider = %self.provider, error = &error as &dyn std::error::Error, "sign-in cleanup failed");
+        }
+    }
+}
+
+async fn login_request<T>(
+    state: &Mutex<State>, generation: u64, seconds: u64,
+    request: impl Future<Output = Result<T, OmniError>>,
+) -> Option<T> {
+    match tokio::time::timeout(Duration::from_secs(seconds), request).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(error)) => {
+            fail_login(state, generation, &error);
+            None
+        }
+        Err(_) => {
+            fail_login_message(state, generation, "sign-in request timed out; retry to get a new code".to_owned());
+            None
+        }
+    }
+}
+
+fn update_login(state: &Mutex<State>, generation: u64, update: impl FnOnce(&mut State)) -> bool {
     let mut guard = state.lock();
-    guard.login.phase = LoginPhase::Waiting;
-    guard.login.width = qr.width;
-    guard.login.modules = qr.modules.clone();
-    guard.login.message.clear();
+    if guard.login_generation != generation {
+        return false;
+    }
+    update(&mut guard);
+    true
+}
+
+fn store_qr(state: &Mutex<State>, generation: u64, qr: &LoginQr) -> bool {
+    update_login(state, generation, |guard| {
+        guard.login.phase = LoginPhase::Waiting;
+        guard.login.width = qr.width;
+        guard.login.modules = qr.modules.clone();
+        guard.login.message.clear();
+    })
 }
 
 fn fail_login(state: &Mutex<State>, generation: u64, error: &OmniError) {
     tracing::warn!(error = error as &dyn std::error::Error, "sign-in failed");
-    let mut guard = state.lock();
-    if guard.login_generation != generation {
-        return;
-    }
-    guard.login.phase = LoginPhase::Failed;
-    guard.login.message = error_text(error);
+    fail_login_message(state, generation, error_text(error));
+}
+
+fn fail_login_message(state: &Mutex<State>, generation: u64, message: String) {
+    update_login(state, generation, |guard| {
+        guard.login.phase = LoginPhase::Failed;
+        guard.login.width = 0;
+        guard.login.modules.clear();
+        guard.login.message = message;
+    });
 }
 
 fn error_text(error: &OmniError) -> String {

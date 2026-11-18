@@ -1,5 +1,6 @@
 package io.github.techuouo520.folia.spatial
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -22,15 +23,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Bounded IO/decode and staging storage; neither Compose nor GL decodes artwork. */
-internal class DailySpatialCovers(private val source: (String) -> ByteArray?, private val sharePreviews: Boolean=false) : AutoCloseable {
+internal class DailySpatialCovers(context: Context, private val source: (String) -> ByteArray?) : AutoCloseable {
     companion object {
         const val TILE = 64
         const val SIZE = 768
         const val PREVIEWS = 2048
         const val INITIAL_PREVIEWS = 1024
         const val ATLAS_SIDE = 32
-        private val sharedPreviews=object: LruCache<String,Preview>(8*1024*1024) {
+        private val sharedPreviews=object: LruCache<String,Preview>(16*1024*1024) {
             override fun sizeOf(key: String,value: Preview)=value.bitmap.allocationByteCount
+        }
+        private val cacheWorker = (Executors.newFixedThreadPool(1) { task ->
+            Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); task.run() }, "Folia-ThumbnailCache")
+        } as ThreadPoolExecutor).apply {
+            setKeepAliveTime(10, TimeUnit.SECONDS)
+            allowCoreThreadTimeOut(true)
         }
         fun trimShared() { sharedPreviews.evictAll() }
         private const val FULL_BYTES = SIZE * SIZE * 4
@@ -45,7 +52,8 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
         allowCoreThreadTimeOut(true)
     }
     private val palette = ThreadLocal.withInitial { IntArray(TILE * TILE) }
-    private val previews = LruCache<String, Preview>(1536)
+    private val thumbnailCache = CoverThumbnailCache(context)
+    private val previewKeys = LruCache<String, String>(PREVIEWS)
     private val pixels = DailySpatialPixels(SIZE, STAGING_BYTES)
     private val pending = mutableSetOf<String>()
     private val pendingFull = mutableSetOf<String>()
@@ -60,7 +68,12 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
 
     fun setDirty(callback: () -> Unit) { dirty = callback }
     fun contentRevision() = revision.get()
-    fun preview(url: String?) = url?.let { previews.get(it) ?: if(sharePreviews) sharedPreviews.get(it) else null }
+    fun preview(url: String?): Preview? {
+        if (url == null) return null
+        previewKeys.get(url)?.let { return sharedPreviews.get(it) }
+        if (SpatialCoverSource.isLocal(url)) return null
+        return sharedPreviews.get(url)?.also { previewKeys.put(url, url) }
+    }
     fun full(url: String?) = url?.let(pixels::ready)
     fun uploaded(url: String?) { if (url != null) pixels.uploaded(url) }
     fun highPreparation(active: Boolean) = Unit
@@ -91,12 +104,11 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
 
     fun request(url: String?, high: Boolean) {
         if (url.isNullOrEmpty() || closed) return
-        if(!high&&sharePreviews) sharedPreviews.get(url)?.let {previews.put(url,it);return}
-        if (if (high) pixels.ready(url) != null else previews.get(url) != null) return
+        if (if (high) pixels.ready(url) != null else preview(url) != null) return
         val work = if (high) pendingFull else pending
         synchronized(pending) {
             // Recheck publication under the admission lock: GL may already borrow it.
-            if (closed || (high && !highActive) || (if (high) pixels.ready(url) != null else previews.get(url) != null)) return
+            if (closed || (high && !highActive) || (if (high) pixels.ready(url) != null else preview(url) != null)) return
             if (url in work || unavailable(url)) return
             if (high && (pixels.readyCount() + pendingFull.size + 1) * FULL_BYTES > STAGING_BYTES) return
             if (high && pixels.promote(url)) { changed(); return }
@@ -117,23 +129,29 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
             var staging: ByteBuffer? = null
             try {
                 if (closed || (high && !highActive)) return
+                if (!high) {
+                    loadPreview(url, false)
+                    return
+                }
                 // Reserve pooled upload storage before spending CPU on an HD decode.
-                if (high) staging = pixels.acquire() ?: return
-                val image = decode(url, if (high) SIZE else TILE) ?: return
-                if (high) {
-                    val buffer = checkNotNull(staging)
-                    try { image.copyPixelsToBuffer(buffer); buffer.flip() } finally { image.recycle() }
-                    synchronized(pending) {
-                        if (closed || !highActive) return
-                        pixels.publish(url, buffer)
-                        staging = null
+                staging = pixels.acquire() ?: return
+                val version = SpatialCoverSource.version(url)
+                val image = decode(url, SIZE) ?: return
+                val buffer = checkNotNull(staging)
+                try {
+                    if (version != SpatialCoverSource.version(url)) return
+                    if (sharedPreviews.get(version) == null) {
+                        storePreview(url, version, Bitmap.createScaledBitmap(image, TILE, TILE, true), true)
+                    } else {
+                        previewKeys.put(url, version)
                     }
-                } else {
-                    val preview = coloredPreview(image)
-                    if(sharePreviews) sharedPreviews.put(url,preview)
-                    synchronized(pending) {
-                        if (!closed) previews.put(url, preview)
-                    }
+                    image.copyPixelsToBuffer(buffer)
+                    buffer.flip()
+                } finally { image.recycle() }
+                synchronized(pending) {
+                    if (closed || !highActive) return
+                    pixels.publish(url, buffer)
+                    staging = null
                 }
             } finally {
                 synchronized(pending) {
@@ -145,6 +163,40 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
                 changed()
             }
         }
+    }
+
+    private fun loadPreview(url: String, cachedOnly: Boolean): Preview? {
+        if (closed) return null
+        val version = SpatialCoverSource.version(url)
+        sharedPreviews.get(version)?.let {
+            previewKeys.put(url, version)
+            return it
+        }
+        val cached = thumbnailCache.read(version)
+        val image = cached ?: if (cachedOnly) null else decode(url, TILE)
+        if (image == null) {
+            previewKeys.remove(url)
+            return null
+        }
+        if (version != SpatialCoverSource.version(url)) {
+            image.recycle()
+            previewKeys.remove(url)
+            return null
+        }
+        return storePreview(url, version, image, cached == null)
+    }
+
+    private fun storePreview(url: String, version: String, image: Bitmap, persist: Boolean): Preview {
+        val preview = coloredPreview(image)
+        val retained = synchronized(sharedPreviews) {
+            sharedPreviews.get(version) ?: preview.also { sharedPreviews.put(version, it) }
+        }
+        if (retained !== preview) image.recycle()
+        if (!closed) previewKeys.put(url, version)
+        synchronized(pending) { failed.remove(url) }
+        changed()
+        if (persist) thumbnailCache.write(version, retained.bitmap)
+        return retained
     }
 
     private fun coloredPreview(image: Bitmap): Preview {
@@ -205,6 +257,32 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
         if (!closed) failed[url] = SystemClock.uptimeMillis()
     }
 
+    // Disk reads run independently of network/decode work so cached entry frames cannot queue behind it.
+    fun warmCached(items: List<SpatialItem>, ready: () -> Unit) {
+        val epoch = warmEpoch.incrementAndGet()
+        val urls = items.map { it.coverUrl }.filter { it.isNotEmpty() }.distinct()
+        val missing = urls.filter { SpatialCoverSource.isLocal(it) || preview(it) == null }
+        if (missing.isEmpty()) {
+            main.post { if (!closed && epoch == warmEpoch.get()) ready() }
+            return
+        }
+        cacheWorker.execute {
+            try {
+                for (url in missing) {
+                    if (closed || epoch != warmEpoch.get()) return@execute
+                    loadPreview(url, true)
+                }
+            } finally {
+                main.post {
+                    if (!closed && epoch == warmEpoch.get()) {
+                        changed()
+                        ready()
+                    }
+                }
+            }
+        }
+    }
+
     fun warm(items: List<SpatialItem>, limit: Int=INITIAL_PREVIEWS, progress: (Int, Int) -> Unit, ready: () -> Unit) {
         val epoch = warmEpoch.incrementAndGet()
         val urls = items.take(limit.coerceIn(1,INITIAL_PREVIEWS)).map { it.coverUrl }.filter { it.isNotEmpty() }.distinct()
@@ -217,16 +295,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
                 while (!closed && epoch == warmEpoch.get()) {
                     val i = cursor.getAndIncrement()
                     if (i >= urls.size) break
-                    if(sharePreviews) sharedPreviews.get(urls[i])?.let {previews.put(urls[i],it)}
-                    if (previews.get(urls[i]) == null && !unavailable(urls[i])) {
-                        decode(urls[i], TILE)?.let { image ->
-                            val preview = coloredPreview(image)
-                            if(sharePreviews) sharedPreviews.put(urls[i],preview)
-                            synchronized(pending) {
-                                if (!closed) { previews.put(urls[i], preview); revision.incrementAndGet() }
-                            }
-                        }
-                    }
+                    if (preview(urls[i]) == null && !unavailable(urls[i]) && loadPreview(urls[i], false) != null) revision.incrementAndGet()
                     val n = done.incrementAndGet()
                     if (n % 16 == 0 || n == urls.size) main.post {
                         if (!closed && epoch == warmEpoch.get()) progress(n, urls.size)
@@ -246,7 +315,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
         workers.shutdownNow()
         main.removeCallbacksAndMessages(null)
         synchronized(pending) {
-            pixels.close(); previews.evictAll(); pending.clear(); pendingFull.clear(); failed.clear()
+            pixels.close(); previewKeys.evictAll(); pending.clear(); pendingFull.clear(); failed.clear()
         }
     }
 }

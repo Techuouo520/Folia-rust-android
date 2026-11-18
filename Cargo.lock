@@ -1113,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "folia-core"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "serde",
 ]
@@ -1121,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "folia-i18n"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "folia-core",
  "thiserror 2.0.21",
@@ -1132,7 +1132,7 @@ dependencies = [
 [[package]]
 name = "folia-library"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "encoding_rs",
  "folia-core",
@@ -1149,7 +1149,7 @@ dependencies = [
 [[package]]
 name = "folia-lyrics"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "base64 0.23.1",
  "folia-core",
@@ -1163,7 +1163,7 @@ dependencies = [
 [[package]]
 name = "folia-omni"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -1185,7 +1185,7 @@ dependencies = [
  "rsa",
  "rumqttc",
  "rustls",
- "rustls-native-certs",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1230,7 +1230,7 @@ version = "0.1.0"
 [[package]]
 name = "folia-store"
 version = "0.1.2"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#ec4f05f591f1f23ed95ce03921ae690dd8374cbc"
+source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#7c822852475978d5a26e8688c4861487e0ae95ef"
 dependencies = [
  "directories",
  "folia-core",

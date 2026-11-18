@@ -115,11 +115,13 @@ fun SpatialMap(
     PinMusicBarSide(sceneActive && interactive && controller.contextActive)
     DisposableEffect(controller) {
         val app=context.applicationContext
+        fun trimMemory() { controller.trimRetained();DailySpatialCovers.trimShared() }
         val memory=object: android.content.ComponentCallbacks2 {
             override fun onConfigurationChanged(config: android.content.res.Configuration) = Unit
-            override fun onLowMemory() { controller.trimRetained();DailySpatialCovers.trimShared() }
+            @Deprecated("Only delivered before Android 14")
+            override fun onLowMemory() { trimMemory() }
             override fun onTrimMemory(level: Int) {
-                if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) onLowMemory()
+                if(io.github.techuouo520.folia.shouldTrimSceneMemory(level)) trimMemory()
             }
         }
         app.registerComponentCallbacks(memory)
@@ -185,11 +187,11 @@ fun SpatialMap(
             if (sceneActive) navigation?.attach(camera)
             onDispose { navigation?.detach(camera) }
         }
-        BackHandler(camera.entering && sceneActive && interactive && navigation?.modalOpen != true) { camera.entering = false }
+        BackHandler(camera.entering && sceneActive && interactive && !coveredByPlayer && navigation?.modalOpen != true) { camera.entering = false }
     }
     val parentWorld=rememberGraphicsLayer()
     val underWorld=rememberGraphicsLayer()
-    BackHandler(camera == null && sceneActive && interactive && controller.contextActive && controller.entry == null) { controller.command(if(frame[RH]>.5f) 23 else 16) }
+    BackHandler(camera == null && sceneActive && interactive && !coveredByPlayer && controller.contextActive && controller.entry == null) { controller.command(if(frame[RH]>.5f) 23 else 16) }
     val returning = controller.entry?.openRequested == false || camera?.entering == false
     LaunchedEffect(returning) { if (returning) controller.resumeReturningMap() }
     Box(modifier.fillMaxSize().graphicsLayer { alpha=if(chrome&&controller.ready) controller.presentationAlpha else 1f }.background(if(dark) Color.Black else Color.White).drawWithContent {
@@ -228,7 +230,7 @@ fun SpatialMap(
                     }
                     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
                         presented.value()
-                        if(!readySignalled&&controller.ready&&controller.presentationAlpha>=1f) {
+                        if(!readySignalled&&controller.ready) {
                             readySignalled=true;sceneReady.value()
                         }
                     }
@@ -300,7 +302,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     val density=context.resources.displayMetrics.density
     private val main=Handler(Looper.getMainLooper())
     private val state=SpatialNative.dailySpatialCreate()
-    private val covers=DailySpatialCovers(source,previewLimit<DailySpatialCovers.INITIAL_PREVIEWS)
+    private val covers=DailySpatialCovers(context, source)
     val frame=FloatArray(DailySpatialProtocol.FLOATS)
     // These clocks are read only by their draw scopes, never by the page composition.
     val drawVersion = mutableIntStateOf(0)
@@ -353,10 +355,13 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     }
     fun suspendRendering() { active=false;resetClock=true;main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close() }
     fun surfaceDetached() {
+        cancelPreviewWarm()
         surfaceTexture=null;attached=false;gpuReady=false;ready=false;inFlight=false;resetClock=true
         main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close()
     }
     private var closed=false;private var gpuReady=false
+    private var previewWarmGeneration = 0
+    private var warmingPreviews = false
     private var inFlight=false;private var dirty=false;private var scheduled=false;private var epoch=0
     var paintCapture: ((android.graphics.Bitmap,android.graphics.Rect,FloatArray)->Unit)?=null
     private var submittedCamera: AlbumCamera? = null
@@ -368,7 +373,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     val renderer: DailySpatialRenderer=DailySpatialRenderer(context,density,covers,object: DailySpatialRenderer.Listener {
         override fun onReady() { if(!closed) { gpuReady=true;inFlight=false;resetClock=true;reveal() } }
         override fun onHdrReady(supported: Boolean) { hdrSupported=supported;hdr.setActive(hdrEnabled&&supported&&active&&visible,surfaceDisplay) }
-        override fun onFailure() { if(!closed) { gpuReady=false;ready=false;failure="地图渲染初始化失败";inFlight=false } }
+        override fun onFailure() { if(!closed) { cancelPreviewWarm();gpuReady=false;ready=false;failure="地图渲染初始化失败";inFlight=false } }
         override fun onDirty() { wake() }
         override fun onFrameComplete(values: FloatArray?,swapped: Boolean) {
             inFlight=false
@@ -414,6 +419,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     fun updateItems(next: List<SpatialItem>) {
         if(entry!=null||pendingOpen!=null) { deferredItems=next;return }
         if(next==items) return
+        cancelPreviewWarm()
         albumCamera?.let { camera ->
             if (next.indexOfFirst { it.key == camera.itemKey } != items.indexOfFirst { it.key == camera.itemKey })
                 camera.entering=false
@@ -434,14 +440,37 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         if(!ready) reveal() else wake()
     }
     fun retry() {
+        cancelPreviewWarm()
         failure=null
         surfaceTexture?.let { renderer.attach(it,width,height,true) }
     }
     private fun reveal() {
-        if(closed || !gpuReady || items.isEmpty() || ready) return
-        // Live frame bindings request visible previews and HD covers within the upload budget.
-        ready=true
-        command(3,1)
+        if (closed || !gpuReady || !attached || items.isEmpty() || ready || warmingPreviews) return
+        val generation = ++previewWarmGeneration
+        warmingPreviews = true
+        val indices = linkedSetOf<Int>()
+        val visibleCount = frame[16].toInt().coerceIn(0, DailySpatialProtocol.SLOTS)
+        for (slot in 0 until visibleCount) {
+            val index = frame[DailySpatialProtocol.HEADER + slot * DailySpatialProtocol.STRIDE].toInt()
+            if (index in items.indices) indices.add(index)
+        }
+        val focus = playingIndex.coerceIn(0, items.lastIndex)
+        for (distance in 0 until 48) {
+            if (focus + distance in items.indices) indices.add(focus + distance)
+            if (focus - distance in items.indices) indices.add(focus - distance)
+        }
+        covers.warmCached(indices.map { items[it] }) {
+            if (closed || generation != previewWarmGeneration) return@warmCached
+            warmingPreviews = false
+            if (!gpuReady || !attached) return@warmCached
+            ready = true
+            command(3, 1)
+        }
+    }
+    private fun cancelPreviewWarm() {
+        previewWarmGeneration++
+        warmingPreviews = false
+        covers.cancelWarm()
     }
     fun style(style: Int) { layoutStyle=style;command(30,style);renderer.setLayoutStyle(style) }
     fun setPlayback(key: String?,playing: Boolean) {

@@ -182,6 +182,7 @@ impl Chain {
         self.gain = (gain as f64).clamp(0.0, 3.0);
     }
 
+    #[cfg(test)]
     pub fn is_resting(&self) -> bool {
         self.resting
     }
@@ -398,10 +399,6 @@ impl Chain {
         self.resting = true;
     }
 
-    /// Offset of row `i` (px), for tests and previews.
-    pub fn offset(&self, i: usize) -> f64 {
-        self.p[i] - self.track - self.tops[i]
-    }
 }
 
 #[cfg(test)]

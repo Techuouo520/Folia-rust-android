@@ -3,6 +3,7 @@ precision highp float;
 precision highp sampler2DArray;
 uniform sampler2DArray u_covers;
 uniform sampler2D u_previews;
+uniform vec4 u_cover_blend[25];
 uniform float u_mode;
 uniform float u_dark;
 uniform float u_linear_output;
@@ -20,9 +21,17 @@ out vec4 color;
 uniform float u_zoom;
 flat in float v_lyrics;
 vec3 coverSample(vec2 uv){
- if(v_info.w>.5)return textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
- if(v_preview.z>.5)return textureLod(u_previews,(v_preview.xy+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
- return vec3(mix(.89,.12,u_dark));
+ float blend=0.;
+ if(v_info.w>.5){
+  int layer=clamp(int(v_info.x),0,96);
+  blend=smoothstep(0.,1.,u_cover_blend[layer/4][layer%4]);
+  if(blend>=1.)return textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
+ }
+ vec3 preview=vec3(mix(.89,.12,u_dark));
+ if(v_preview.z>.5)preview=textureLod(u_previews,(v_preview.xy+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
+ if(blend<=0.)return preview;
+ vec3 high=textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
+ return mix(preview,high,blend);
 }
 // COVER_LYRICS_CHIP
 void main(){

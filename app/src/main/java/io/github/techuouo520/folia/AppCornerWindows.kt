@@ -127,7 +127,7 @@ internal fun AppCornerWindows(bridge: FoliaBridge,playerInFront: Boolean,player:
                         onClick={requested=if(requested==name) null else name},
                     ) {
                         if(right) SettingsContents(bridge,dark,requested==owner)
-                        else AccountContents(bridge,session,dark,avatar)
+                        else AccountContents(bridge,session,dark,avatar,requested==owner)
                     }
                 }
             }

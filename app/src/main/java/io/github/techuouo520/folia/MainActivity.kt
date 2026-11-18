@@ -204,6 +204,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
     val playerProgress=remember(route) { androidx.compose.runtime.mutableFloatStateOf(0f) }
     val playerFootprint = if (fullscreenMusicBarEnabled) 88.dp else MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp
     val clearance = remember { PlayerClearance() }
+    val sponsor = rememberSponsorCredit(shell.playback)
     val screenCorner=playerDisplayRadius()
     val playerInFront by remember(playerProgress,playerExpanded) {
         androidx.compose.runtime.derivedStateOf { playerExpanded || playerProgress.floatValue>0f }
@@ -214,7 +215,8 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         ObserveGripSensors(grip)
         Modifier.observeMusicBarSide(dockLeft, grip, gripGate)
     } else Modifier
-    androidx.compose.runtime.CompositionLocalProvider(LocalGripGate provides gripGate, LocalPlayerClearance provides clearance) {
+    androidx.compose.runtime.CompositionLocalProvider(LocalGripGate provides gripGate, LocalPlayerClearance provides clearance,
+        LocalSponsorCredit provides sponsor) {
     AppCornerWindows(bridge,modifier=dockTouch,playerInFront=fullscreenMusicBarEnabled && route=="home" && playerInFront,player={
         if (route == "home") {
             if (fullscreenMusicBarEnabled) MusicBar(bridge,shell.playback,playerFrost,playerExpanded,{playerExpanded=it},
@@ -243,6 +245,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
                 }
             },
             onOpenPlayer = { playerExpanded=true },
+            preloadPlayerLyrics = !fullscreenMusicBarEnabled && playerExpanded && !shell.playback.currentLyric.isNullOrBlank(),
             playerProgress=playerProgress,playerFootprint=playerFootprint,frost=playerFrost,screenCorner=screenCorner,
             onOpenSearch = { route = "search" },
             onPlay = { tracks, index ->

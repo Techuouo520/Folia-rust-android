@@ -4,6 +4,7 @@ precision highp sampler2D;
 precision highp sampler2DArray;
 uniform sampler2DArray u_covers;
 uniform sampler2D u_previews;
+uniform vec4 u_cover_blend[25];
 uniform sampler2D u_scene;
 uniform sampler2D u_depth;
 uniform sampler2D u_soft;
@@ -75,9 +76,17 @@ flat in float v_lyrics;
 vec3 coverSample(vec2 uv){
  // Both artwork textures have one mip level and GL_LINEAR filtering. Explicit
  // level zero keeps identical sampling even in the face-only conditional below.
- if(v_art.y>.5)return textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
- if(v_info.x>.5)return textureLod(u_previews,(v_art.zw+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
- return mix(vec3(.90),vec3(.12),u_dark);
+ float blend=0.;
+ if(v_art.y>.5){
+  int layer=clamp(int(v_art.x),0,96);
+  blend=smoothstep(0.,1.,u_cover_blend[layer/4][layer%4]);
+  if(blend>=1.)return textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
+ }
+ vec3 preview=mix(vec3(.90),vec3(.12),u_dark);
+ if(v_info.x>.5)preview=textureLod(u_previews,(v_art.zw+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
+ if(blend<=0.)return preview;
+ vec3 high=textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
+ return mix(preview,high,blend);
 }
 // COVER_LYRICS_CHIP
 vec3 album(vec2 uv){

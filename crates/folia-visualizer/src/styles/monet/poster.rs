@@ -23,8 +23,11 @@ pub struct Cache {
     pub(super) gpu: Option<std::cell::RefCell<super::rail_gpu::Rows>>,
     rail: Rail,
     pub(super) ticker_bounds: Option<[f32; 6]>,
+    pub(super) raster_density: Option<f32>,
     heading_key: Option<u64>,
+    title: Option<(TitleKey, Vec<TitleRow>)>,
     album: Option<(String, f32, String)>,
+    album_raster: Option<(RasterKey, Option<Raster>)>,
     artist: Option<(ArtistKey, Option<Raster>)>,
     pin: Pin,
     hangers: Vec<(([u32; 6], folia_core::Rgb), Handle)>,
@@ -44,6 +47,29 @@ impl Cache {
 
 /// What the artist raster was made for: label, size, colour, pixel density and the width it was cut to.
 type ArtistKey = (String, u32, [u8; 4], u32, u32, iced_core::Font);
+
+#[derive(PartialEq)]
+struct RasterKey {
+    text: String,
+    px: u32,
+    height: u32,
+    width: u32,
+    density: u32,
+    font: iced_core::Font,
+    rgba: [u8; 4],
+}
+
+#[derive(PartialEq)]
+struct TitleKey {
+    ink: RasterKey,
+    shadow: [u8; 4],
+}
+
+struct TitleRow {
+    text: String,
+    ink: Option<Raster>,
+    shadow: Option<Raster>,
+}
 
 /// The hanger: a click enters edit mode, a drag moves the portrait, a click again leaves.
 #[derive(Debug, Default)]
@@ -102,6 +128,7 @@ pub(crate) fn player_geometry(
         [ink.r, ink.g, ink.b].hash(&mut key);
     }
     [layout.header_width, layout.artist.y, layout.title_px, layout.artist_px].map(f32::to_bits).hash(&mut key);
+    cache.raster_density.map(f32::to_bits).hash(&mut key);
     // All four heading intro tracks have reached their endpoints at 2 seconds.
     scene.time.clamp(0., 2.).to_bits().hash(&mut key);
     let key = key.finish();
@@ -153,11 +180,37 @@ fn foreground(scene: &Scene<'_>, cache: &mut Cache, frame: &mut Frame, layout: &
 fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Layout, place: Place) {
     let theme = scene.theme;
     let time = scene.time;
+    let density = (place.scale * cache.raster_density.unwrap_or(2.0)).max(1.0);
+    let title = if scene.title.trim().is_empty() { "Monet" } else { scene.title.trim() };
+    let line_height = layout.title_px * 1.06;
+    let title_font = scene.monet.typography.font(SEMIBOLD);
+    let title_ink = color(theme.primary, 1.0);
+    let title_shadow = color(theme.background, 1.0);
+    let title_key = TitleKey {
+        ink: RasterKey {
+            text: title.to_owned(), px: layout.title_px.to_bits(), height: line_height.to_bits(),
+            width: layout.header_width.to_bits(), density: density.to_bits(), font: title_font,
+            rgba: title_ink.into_rgba8(),
+        },
+        shadow: title_shadow.into_rgba8(),
+    };
+    // Prepare both passes before their first visible intro frame. Only the current two
+    // title rows are retained; moving and fading them never changes these raster keys.
+    if cache.title.as_ref().is_none_or(|(key, _)| key != &title_key) {
+        let rows = title_rows(title, layout.title_px, layout.header_width, title_font)
+            .into_iter()
+            .map(|text| TitleRow {
+                ink: text::raster(&text, layout.title_px, line_height, title_font, title_ink, density),
+                shadow: text::raster(&text, layout.title_px, line_height, title_font, title_shadow, density),
+                text,
+            })
+            .collect();
+        cache.title = Some((title_key, rows));
+    }
     let artist_p = intro(time, 0.15, 1.2);
     if artist_p > 0.0 {
         let label = if scene.artist.trim().is_empty() { "Monet" } else { scene.artist.trim() };
         let ink = color(theme.primary, 0.96);
-        let density = (place.scale * 2.0).clamp(1.0, 3.0);
         let key = (
             label.to_owned(),
             layout.artist_px.to_bits(),
@@ -211,14 +264,11 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
         return;
     }
     let dx = -40.0 * (1.0 - title_p);
-    let title = if scene.title.trim().is_empty() { "Monet" } else { scene.title.trim() };
-    let rows = title_rows(title, layout.title_px, layout.header_width, scene.monet.typography.font(SEMIBOLD));
-    let line_height = layout.title_px * 1.06;
     let shadow = ink::blur_offsets(18.0, (0.0, 14.0));
     let shade = color(theme.background, ink::split_alpha(0.28 * title_p, shadow.len()));
-    for (index, row) in rows.iter().enumerate() {
+    for (index, row) in cache.title.as_ref().into_iter().flat_map(|(_, rows)| rows).enumerate() {
         let pen = ink::Line {
-            content: row,
+            content: &row.text,
             at: Point::new(layout.title.x + dx, layout.title.y + index as f32 * line_height),
             px: layout.title_px,
             line_height,
@@ -230,8 +280,16 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
             width: frame.width() / place.scale.max(1.0e-3) + 200.0,
             height: line_height + 120.0,
         };
-        ink::masked_copies(frame, place, pen, shade, band, &ink::opaque, &shadow);
-        ink::masked(frame, place, pen, color(theme.primary, title_p), band, &ink::opaque);
+        if let Some(raster) = &row.shadow {
+            raster_copies(frame, place, raster, pen.at, band, shade.a, &shadow);
+        } else {
+            ink::masked_copies(frame, place, pen, shade, band, &ink::opaque, &shadow);
+        }
+        if let Some(raster) = &row.ink {
+            raster_copies(frame, place, raster, pen.at, band, title_p, &[(0.0, 0.0)]);
+        } else {
+            ink::masked(frame, place, pen, color(theme.primary, title_p), band, &ink::opaque);
+        }
     }
     let original = scene.album.trim();
     let album = match &cache.album {
@@ -242,15 +300,40 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
             &cache.album.insert((original.to_owned(), layout.header_width, shown)).2
         }
     };
-    put_text(
-        frame,
-        album,
-        Point::new(layout.album.x + dx, layout.album.y),
-        14.0,
-        20.0,
-        iced_core::Font::DEFAULT,
-        color(theme.secondary, 0.84 * title_p),
-    );
+    let album_ink = color(theme.secondary, 1.0);
+    let album_key = RasterKey {
+        text: album.to_owned(), px: 14.0_f32.to_bits(), height: 20.0_f32.to_bits(),
+        width: layout.header_width.to_bits(), density: density.to_bits(), font: iced_core::Font::DEFAULT,
+        rgba: album_ink.into_rgba8(),
+    };
+    if cache.album_raster.as_ref().is_none_or(|(key, _)| key != &album_key) {
+        let raster = text::raster(album, 14.0, 20.0, iced_core::Font::DEFAULT, album_ink, density);
+        cache.album_raster = Some((album_key, raster));
+    }
+    let at = Point::new(layout.album.x + dx, layout.album.y);
+    if let Some((_, Some(raster))) = &cache.album_raster {
+        let bounds = Rectangle::new(Point::new(at.x - raster.left, at.y), Size::new(raster.width, raster.height));
+        frame.draw_image(bounds, canvas::Image::new(raster.handle.clone()).opacity(0.84 * title_p));
+    } else {
+        put_text(frame, album, at, 14.0, 20.0, iced_core::Font::DEFAULT, color(theme.secondary, 0.84 * title_p));
+    }
+}
+
+// Keep the original opaque mask's thresholds, clipping and per-copy alpha compositing.
+fn raster_copies(
+    frame: &mut Frame, place: Place, raster: &Raster, at: Point, clip: Rectangle, opacity: f32,
+    offsets: &[(f32, f32)],
+) {
+    if clip.width <= 0.0 || clip.height <= 0.0 || opacity <= 0.002 {
+        return;
+    }
+    place.clip(frame, clip, |inner| {
+        for &(dx, dy) in offsets {
+            let origin = Point::new(at.x + dx - raster.left, at.y + dy);
+            let bounds = Rectangle::new(origin, Size::new(raster.width, raster.height));
+            inner.draw_image(bounds, canvas::Image::new(raster.handle.clone()).opacity(opacity));
+        }
+    });
 }
 
 /// At most two rows of the title, the second cut with an ellipsis (`line-clamp-2`, `overflow-wrap: anywhere`).

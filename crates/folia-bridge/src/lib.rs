@@ -513,6 +513,10 @@ impl FoliaBridge {
         self.online.begin_login(&provider);
     }
 
+    pub fn cancel_login(&self) {
+        self.online.cancel_login();
+    }
+
     pub fn login_snapshot(&self) -> LoginSnapshot {
         let view = self.online.login();
         LoginSnapshot {
@@ -549,8 +553,10 @@ impl FoliaBridge {
         }
     }
 
-    pub fn begin_logout(&self) {
+    pub fn begin_logout(&self) -> Result<(), BridgeError> {
+        self.playback.clear_queue()?;
         self.online.begin_logout();
+        Ok(())
     }
 
     pub fn begin_search(&self, query: String, offset: i32) {

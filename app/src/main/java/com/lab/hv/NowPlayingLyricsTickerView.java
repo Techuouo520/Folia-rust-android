@@ -198,19 +198,19 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    private final FrameLayout trackContainer;
    private final PressedRowCardView pressedRowCardView;
    private final SPText nonLyricHintView;
-   private final List timedLines;
-   private final List timedNonLyricLines;
-   private final List timedTranslations;
-   private final List timedTranslationTimelines;
-   private final List plainLines;
-   private final List plainTranslations;
-   private final List rowHolders;
-   private final List sourceGroups;
+   private final List<TimedLine> timedLines;
+   private final List<TimedLine> timedNonLyricLines;
+   private final List<String> timedTranslations;
+   private final List<KaraokeTimeline> timedTranslationTimelines;
+   private final List<String> plainLines;
+   private final List<String> plainTranslations;
+   private final List<RowHolder> rowHolders;
+   private final List<SourceGroup> sourceGroups;
    /** The groups of {@link #sourceGroups} with a prep countdown, in the same order. */
-   private final List prepSourceGroups;
-   private final ArrayList mainRowPool;
-   private final ArrayList translationRowPool;
-   private final ArrayList lagTrackedRows;
+   private final List<SourceGroup> prepSourceGroups;
+   private final ArrayList<CharRowFrame> mainRowPool;
+   private final ArrayList<CharRowFrame> translationRowPool;
+   private final ArrayList<RowHolder> lagTrackedRows;
    /** The rows' lag behind the track (see clearRowLagAnimations and below). */
    private LyricLagChain lagChain;
    private boolean lagChainRunning;
@@ -238,6 +238,8 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    private OnTranslationStateChangeListener translationStateChangeListener;
    @Nullable
    private OnRowsReadyListener rowsReadyListener;
+   @Nullable
+   private Runnable lyricsErrorListener;
    @Nullable
    private OnLyricSeekListener lyricSeekListener;
    private long reportedPlaybackPositionMs;
@@ -507,18 +509,18 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    public NowPlayingLyricsTickerView(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr) {
       super(context, attrs, defStyleAttr);
-      this.timedLines = new ArrayList();
-      this.timedNonLyricLines = new ArrayList();
-      this.timedTranslations = new ArrayList();
-      this.timedTranslationTimelines = new ArrayList();
-      this.plainLines = new ArrayList();
-      this.plainTranslations = new ArrayList();
-      this.rowHolders = new ArrayList();
-      this.sourceGroups = new ArrayList();
-      this.prepSourceGroups = new ArrayList();
-      this.mainRowPool = new ArrayList();
-      this.translationRowPool = new ArrayList();
-      this.lagTrackedRows = new ArrayList();
+      this.timedLines = new ArrayList<>();
+      this.timedNonLyricLines = new ArrayList<>();
+      this.timedTranslations = new ArrayList<>();
+      this.timedTranslationTimelines = new ArrayList<>();
+      this.plainLines = new ArrayList<>();
+      this.plainTranslations = new ArrayList<>();
+      this.rowHolders = new ArrayList<>();
+      this.sourceGroups = new ArrayList<>();
+      this.prepSourceGroups = new ArrayList<>();
+      this.mainRowPool = new ArrayList<>();
+      this.translationRowPool = new ArrayList<>();
+      this.lagTrackedRows = new ArrayList<>();
       this.lyricsParseExecutor = createLyricsParseExecutor();
       this.lyricsMainHandler = new Handler(Looper.getMainLooper());
       this.tickerEnabled = false;
@@ -705,7 +707,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
          t.setPriority(1);
          return t;
       };
-      ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 12L, TimeUnit.SECONDS, new LinkedBlockingQueue(1), factory, (r, e) -> {
+      ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 12L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(1), factory, (r, e) -> {
          if (!e.isShutdown()) {
             e.getQueue().poll();
 
@@ -793,33 +795,52 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       long token = ++this.lyricsParseToken;
       this.lyricsParseInFlight = true;
       this.lyricsParseExecutor.execute(() -> {
-         List<TimedLine> lines = new ArrayList<>(source.size());
-         List<String> translations = new ArrayList<>(source.size());
-         List<KaraokeTimeline> subtitles = new ArrayList<>(source.size());
-         for (io.github.techuouo520.folia.bridge.MonetTickerLine line : source) {
-            List<Long> times = line.getWordTimes();
-            List<Integer> ends = line.getWordEnds();
-            KaraokeTimeline timeline = buildKaraokeTimeline(times, ends, line.getText());
-            if (times.size() == 1 && ends.size() == 1 && ends.get(0) > 0) {
-               timeline = buildKaraokeTimelineWithTextShape(new long[]{times.get(0)},
-                     new int[]{ends.get(0)}, line.getText().codePoints().toArray());
+         try {
+            List<TimedLine> lines = new ArrayList<>(source.size());
+            List<String> translations = new ArrayList<>(source.size());
+            List<KaraokeTimeline> subtitles = new ArrayList<>(source.size());
+            for (io.github.techuouo520.folia.bridge.MonetTickerLine line : source) {
+               List<Long> times = line.getWordTimes();
+               List<Integer> ends = line.getWordEnds();
+               KaraokeTimeline timeline = buildKaraokeTimeline(times, ends, line.getText());
+               if (times.size() == 1 && ends.size() == 1 && ends.get(0) > 0) {
+                  timeline = buildKaraokeTimelineWithTextShape(new long[]{times.get(0)},
+                        new int[]{ends.get(0)}, line.getText().codePoints().toArray());
+               }
+               if (timeline != null) timeline.terminalEndMs = line.getEndMs();
+               lines.add(new TimedLine(line.getStartMs(), line.getText(), false, -1L, timeline));
+               String translation = line.getTranslation();
+               translations.add(translation);
+               subtitles.add(timeline == null || TextUtils.isEmpty(translation) ? null
+                     : buildMappedTranslationKaraokeTimeline(timeline, translation));
             }
-            if (timeline != null) timeline.terminalEndMs = line.getEndMs();
-            lines.add(new TimedLine(line.getStartMs(), line.getText(), false, -1L, timeline));
-            String translation = line.getTranslation();
-            translations.add(translation);
-            subtitles.add(timeline == null || TextUtils.isEmpty(translation) ? null
-                  : buildMappedTranslationKaraokeTimeline(timeline, translation));
+            ParsedLyricsData parsed = new ParsedLyricsData(lines, Collections.emptyList(), translations,
+                  subtitles, Collections.emptyList(), Collections.emptyList());
+            this.lyricsMainHandler.post(() -> {
+               if (this.lyricsParseToken != token) return;
+               this.lyricsParseInFlight = false;
+               this.disableBlurForCurrentContent = lines.isEmpty();
+               try {
+                  this.applyParsedLyricsData(parsed);
+               } catch (RuntimeException error) {
+                  this.failMonetLines(token, error);
+               }
+            });
+         } catch (RuntimeException error) {
+            this.lyricsMainHandler.post(() -> this.failMonetLines(token, error));
          }
-         ParsedLyricsData parsed = new ParsedLyricsData(lines, Collections.emptyList(), translations,
-               subtitles, Collections.emptyList(), Collections.emptyList());
-         this.lyricsMainHandler.post(() -> {
-            if (this.lyricsParseToken != token) return;
-            this.lyricsParseInFlight = false;
-            this.disableBlurForCurrentContent = lines.isEmpty();
-            this.applyParsedLyricsData(parsed);
-         });
       });
+   }
+
+   private void failMonetLines(long token, RuntimeException error) {
+      if (this.lyricsParseToken != token) return;
+      this.lyricsParseInFlight = false;
+      ++this.rowBuildGeneration;
+      this.rowBuildActive = false;
+      this.rowBuildOnPrepared = null;
+      android.view.Choreographer.getInstance().removeFrameCallback(this.rowBuildFrame);
+      android.util.Log.w("FoliaLyrics", "Could not prepare lyric rows", error);
+      if (this.lyricsErrorListener != null) this.lyricsErrorListener.run();
    }
 
    /** Use the font sizes of the poster layout, in physical pixels, including its size setting. */
@@ -1128,7 +1149,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    }
 
-   private boolean containsNonEmptyTranslation(@NonNull List translations) {
+   private boolean containsNonEmptyTranslation(@NonNull List<String> translations) {
       for(int i = 0; i < translations.size(); ++i) {
          if (!TextUtils.isEmpty((CharSequence)translations.get(i))) {
             return true;
@@ -1161,18 +1182,18 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    @NonNull
    private ParsedLyricsData parseLyricsTextInternal(@Nullable String text) {
-      ArrayList<TimedLine> parsedTimedLines = new ArrayList();
-      ArrayList<TimedLine> parsedTimedNonLyricLines = new ArrayList();
-      ArrayList<String> parsedTimedTranslations = new ArrayList();
-      ArrayList<KaraokeTimeline> parsedTimedTranslationTimelines = new ArrayList();
-      ArrayList<String> parsedPlainLines = new ArrayList();
-      ArrayList<String> parsedPlainTranslations = new ArrayList();
+      ArrayList<TimedLine> parsedTimedLines = new ArrayList<>();
+      ArrayList<TimedLine> parsedTimedNonLyricLines = new ArrayList<>();
+      ArrayList<String> parsedTimedTranslations = new ArrayList<>();
+      ArrayList<KaraokeTimeline> parsedTimedTranslationTimelines = new ArrayList<>();
+      ArrayList<String> parsedPlainLines = new ArrayList<>();
+      ArrayList<String> parsedPlainTranslations = new ArrayList<>();
       if (TextUtils.isEmpty(text)) {
          return new ParsedLyricsData(parsedTimedLines, parsedTimedNonLyricLines, parsedTimedTranslations, parsedTimedTranslationTimelines, parsedPlainLines, parsedPlainTranslations);
       } else {
          String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
          String[] rawLines = normalized.split("\n");
-         ArrayList<TimedTextToken> timedTokens = new ArrayList();
+         ArrayList<TimedTextToken> timedTokens = new ArrayList<>();
          int emittedOrder = 0;
          String pendingUntimedPerformerMarker = null;
 
@@ -1230,12 +1251,12 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
             return new ParsedLyricsData(parsedTimedLines, parsedTimedNonLyricLines, parsedTimedTranslations, parsedTimedTranslationTimelines, parsedPlainLines, parsedPlainTranslations);
          } else {
             timedTokens.sort((a, b) -> a.timeMs != b.timeMs ? Long.compare(a.timeMs, b.timeMs) : Integer.compare(a.order, b.order));
-            ArrayList<TimedTextToken> lyricTokens = new ArrayList(timedTokens.size());
+            ArrayList<TimedTextToken> lyricTokens = new ArrayList<>(timedTokens.size());
 
             int j;
             for(int i = 0; i < timedTokens.size(); i = j) {
                long time = ((TimedTextToken)timedTokens.get(i)).timeMs;
-               ArrayList<String> nonLyricChunk = new ArrayList();
+               ArrayList<String> nonLyricChunk = new ArrayList<>();
 
                for(j = i; j < timedTokens.size() && ((TimedTextToken)timedTokens.get(j)).timeMs == time; ++j) {
                   TimedTextToken token = (TimedTextToken)timedTokens.get(j);
@@ -1369,12 +1390,12 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private ArrayList parseTimedTokensForRawLine(@NonNull String rawLine, int baseOrder) {
-      ArrayList<TimedTextToken> out = new ArrayList();
+   private ArrayList<TimedTextToken> parseTimedTokensForRawLine(@NonNull String rawLine, int baseOrder) {
+      ArrayList<TimedTextToken> out = new ArrayList<>();
       Matcher matcher = LRC_TIME_PATTERN.matcher(rawLine);
-      ArrayList<Long> stamps = new ArrayList();
-      ArrayList<Integer> stampStarts = new ArrayList();
-      ArrayList<Integer> stampEnds = new ArrayList();
+      ArrayList<Long> stamps = new ArrayList<>();
+      ArrayList<Integer> stampStarts = new ArrayList<>();
+      ArrayList<Integer> stampEnds = new ArrayList<>();
 
       while(matcher.find()) {
          long stamp = this.parseTimestampMs(matcher.group(1), matcher.group(2), matcher.group(3), matcher.group(4));
@@ -1389,7 +1410,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
          return out;
       } else {
          String plainAfterTags = this.normalizeLyricLineText(this.collapseSpaces(LRC_TIME_PATTERN.matcher(rawLine).replaceAll("")));
-         ArrayList<String> segments = new ArrayList(stamps.size());
+         ArrayList<String> segments = new ArrayList<>(stamps.size());
          int nonEmptySegmentCount = 0;
          int singleSegmentIndex = -1;
          String singleSegmentText = null;
@@ -1412,8 +1433,8 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
          if (stamps.size() > 1 && nonEmptySegmentCount >= 2) {
             StringBuilder textBuilder = new StringBuilder();
-            ArrayList<Long> tokenTimeMs = new ArrayList();
-            ArrayList<Integer> tokenEndCodePoint = new ArrayList();
+            ArrayList<Long> tokenTimeMs = new ArrayList<>();
+            ArrayList<Integer> tokenEndCodePoint = new ArrayList<>();
             int codePointCursor = 0;
 
             for(int i = 0; i < segments.size(); ++i) {
@@ -1483,7 +1504,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @Nullable
-   private KaraokeTimeline buildKaraokeTimeline(@NonNull List tokenTimeMs, @NonNull List tokenEndCodePoint, @NonNull String lineText) {
+   private KaraokeTimeline buildKaraokeTimeline(@NonNull List<Long> tokenTimeMs, @NonNull List<Integer> tokenEndCodePoint, @NonNull String lineText) {
       int size = Math.min(tokenTimeMs.size(), tokenEndCodePoint.size());
       if (size <= 1) {
          return null;
@@ -1807,8 +1828,8 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       }
 
       mappedEndCodePoint[tokenCount - 1] = translationCodePoints.length;
-      ArrayList<Long> compactTimeMs = new ArrayList(tokenCount);
-      ArrayList<Integer> compactEndCodePoint = new ArrayList(tokenCount);
+      ArrayList<Long> compactTimeMs = new ArrayList<>(tokenCount);
+      ArrayList<Integer> compactEndCodePoint = new ArrayList<>(tokenCount);
       int lastEnd = 0;
       long lastTime = Long.MIN_VALUE;
       for(int i = 0; i < tokenCount; ++i) {
@@ -1931,9 +1952,9 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List adjustTokenEndCodePointsForTrim(@NonNull List tokenEndCodePoint, int leadingTrimmedCodePoints, @NonNull String trimmedLineText) {
+   private List<Integer> adjustTokenEndCodePointsForTrim(@NonNull List<Integer> tokenEndCodePoint, int leadingTrimmedCodePoints, @NonNull String trimmedLineText) {
       int lineCodePointCount = trimmedLineText.codePointCount(0, trimmedLineText.length());
-      ArrayList<Integer> adjusted = new ArrayList(tokenEndCodePoint.size());
+      ArrayList<Integer> adjusted = new ArrayList<>(tokenEndCodePoint.size());
 
       for(int i = 0; i < tokenEndCodePoint.size(); ++i) {
          int end = (Integer)tokenEndCodePoint.get(i) - Math.max(0, leadingTrimmedCodePoints);
@@ -2478,6 +2499,10 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    public void setOnRowsReadyListener(@Nullable OnRowsReadyListener listener) {
       this.rowsReadyListener = listener;
+   }
+
+   public void setOnLyricsErrorListener(@Nullable Runnable listener) {
+      this.lyricsErrorListener = listener;
    }
 
    public void setOnLyricSeekListener(@Nullable OnLyricSeekListener listener) {
@@ -4147,14 +4172,20 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       android.view.Display display=this.getDisplay();
       float hz=display==null?60f:display.getRefreshRate();
       long period=(long)(1_000_000_000d/Math.max(1f,hz));
+      int remaining=this.rowBuildCount()-this.rowBuildCursor;
       int quota=com.lab.hv.util.NativeKernels.lyricPreloadQuota(period,System.nanoTime()-frameTimeNs,
-            this.rowBuildMeanCostNs,this.rowBuildCount()-this.rowBuildCursor);
+            this.rowBuildMeanCostNs,remaining);
       long start=System.nanoTime();int built=0;
+      // The loading screen waits for these rows, so a late frame must not starve preparation.
+      // Keep the work sliced, but prepare at least one source row per callback.
+      if(remaining>0)quota=Math.max(1,quota);
       while(built<quota&&this.rowBuildCursor<this.rowBuildCount()){
          this.appendNextPreloadSource();built++;
          if(System.nanoTime()-start>=Math.min(2_000_000L,period/8))break;
       }
-      if(built>0)this.rowBuildMeanCostNs=Math.max(100_000L,(this.rowBuildMeanCostNs*3+(System.nanoTime()-start)/built)/4);
+      if(built>0){
+         this.rowBuildMeanCostNs=Math.max(100_000L,(this.rowBuildMeanCostNs*3+(System.nanoTime()-start)/built)/4);
+      }
       if(this.rowBuildCursor<this.rowBuildCount()){
          android.view.Choreographer.getInstance().postFrameCallback(this.rowBuildFrame);return;
       }
@@ -6398,7 +6429,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List splitToFixedRows(@Nullable String text, int charsPerRow, float textSizePx) {
+   private List<String> splitToFixedRows(@Nullable String text, int charsPerRow, float textSizePx) {
       if (TextUtils.isEmpty(text)) {
          return Collections.emptyList();
       } else {
@@ -6532,7 +6563,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List splitWordAwareRows(@NonNull String text, int charsPerRow, float textSizePx) {
+   private List<String> splitWordAwareRows(@NonNull String text, int charsPerRow, float textSizePx) {
       String collapsed = this.collapseSpaces(text);
       if (TextUtils.isEmpty(collapsed)) {
          return Collections.emptyList();
@@ -6542,7 +6573,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
             return this.splitByCodePointBudget(collapsed, Math.max(charsPerRow, 16));
          } else {
             String[] words = collapsed.split(" ");
-            List<String> rows = new ArrayList();
+            List<String> rows = new ArrayList<>();
             StringBuilder rowBuilder = new StringBuilder();
             float rowWidthPx = 0.0F;
             float spaceWidthPx = this.measureTextPx(" ", textSizePx);
@@ -6612,7 +6643,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       return out.toString();
    }
 
-   private void appendSplitLongWordByWidth(@NonNull List rows, @NonNull String word, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
+   private void appendSplitLongWordByWidth(@NonNull List<String> rows, @NonNull String word, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
       int[] cps = word.codePoints().toArray();
       if (cps.length != 0) {
          if (!(maxWidthPx <= this.dpF(40.0F))) {
@@ -6653,14 +6684,14 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List splitCodePointByWidth(@NonNull String text, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
+   private List<String> splitCodePointByWidth(@NonNull String text, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
       int[] cps = text.codePoints().toArray();
       if (cps.length == 0) {
          return Collections.emptyList();
       } else if (maxWidthPx <= this.dpF(40.0F)) {
          return this.splitByCodePointBudget(text, fallbackCharsPerRow);
       } else {
-         List<String> rows = new ArrayList();
+         List<String> rows = new ArrayList<>();
          StringBuilder rowBuilder = new StringBuilder();
          float rowWidth = 0.0F;
 
@@ -6690,13 +6721,13 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List splitByCodePointBudget(@NonNull String text, int budget) {
+   private List<String> splitByCodePointBudget(@NonNull String text, int budget) {
       int[] cps = text.codePoints().toArray();
       if (cps.length == 0) {
          return Collections.emptyList();
       } else {
          int safeBudget = Math.max(1, budget);
-         List<String> rows = new ArrayList();
+         List<String> rows = new ArrayList<>();
 
          for(int i = 0; i < cps.length; i += safeBudget) {
             int end = Math.min(cps.length, i + safeBudget);
@@ -6798,7 +6829,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private String joinPlainLines(@NonNull List lines) {
+   private String joinPlainLines(@NonNull List<String> lines) {
       if (lines.isEmpty()) {
          return "";
       } else {
@@ -7013,24 +7044,24 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    private static final class ParsedLyricsData {
       @NonNull
-      final List timedLines;
+      final List<TimedLine> timedLines;
       @NonNull
-      final List timedNonLyricLines;
+      final List<TimedLine> timedNonLyricLines;
       @NonNull
-      final List timedTranslations;
+      final List<String> timedTranslations;
       @NonNull
-      final List timedTranslationTimelines;
+      final List<KaraokeTimeline> timedTranslationTimelines;
       @NonNull
-      final List plainLines;
+      final List<String> plainLines;
       @NonNull
-      final List plainTranslations;
+      final List<String> plainTranslations;
 
-      ParsedLyricsData(@NonNull List timedLines,
-                       @NonNull List timedNonLyricLines,
-                       @NonNull List timedTranslations,
-                       @NonNull List timedTranslationTimelines,
-                       @NonNull List plainLines,
-                       @NonNull List plainTranslations) {
+      ParsedLyricsData(@NonNull List<TimedLine> timedLines,
+                       @NonNull List<TimedLine> timedNonLyricLines,
+                       @NonNull List<String> timedTranslations,
+                       @NonNull List<KaraokeTimeline> timedTranslationTimelines,
+                       @NonNull List<String> plainLines,
+                       @NonNull List<String> plainTranslations) {
          this.timedLines = timedLines;
          this.timedNonLyricLines = timedNonLyricLines;
          this.timedTranslations = timedTranslations;
@@ -7045,7 +7076,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       final int direction;
       final int targetSourceIndex;
       @NonNull
-      final List affectedRows;
+      final List<RowHolder> affectedRows;
       final float baseLag;
       float lastLagProgress;
       boolean releaseStarted;
@@ -7054,13 +7085,13 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
          this.token = token;
          this.direction = direction;
          this.targetSourceIndex = targetSourceIndex;
-         this.affectedRows = new ArrayList();
+         this.affectedRows = new ArrayList<>();
          this.baseLag = baseLag;
          this.lastLagProgress = 0.0F;
          this.releaseStarted = false;
       }
 
-      void replaceAffectedRows(@NonNull List rows) {
+      void replaceAffectedRows(@NonNull List<RowHolder> rows) {
          this.affectedRows.clear();
          this.affectedRows.addAll(rows);
       }
@@ -7118,7 +7149,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
    private static final class CharRowFrame extends FrameLayout {
       private static final Object ROW_BLUR_EFFECT_CACHE_LOCK = new Object();
-      private static final SparseArray ROW_BLUR_EFFECT_CACHE = new SparseArray();
+      private static final SparseArray<RenderEffect> ROW_BLUR_EFFECT_CACHE = new SparseArray<>();
       private final float charTextPx;
       private final float weightStrengthPx;
       private final float prepDotWeightStrengthPx;
@@ -7133,7 +7164,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
        * as child views: one display list per row instead of a RenderNode, measure, layout and
        * record per glyph, with exactly what the per-glyph views drew.
        */
-      private final ArrayList charViews = new ArrayList();
+      private final ArrayList<LyricGlyphRun> charViews = new ArrayList<>();
       private final LyricGlyphRun.Paints glyphPaints = new LyricGlyphRun.Paints();
       /** Runs placed by the last child layout; any past the row's right edge are not drawn. */
       private int laidOutGlyphCount = 0;

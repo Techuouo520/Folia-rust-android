@@ -25,6 +25,7 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
     private var position = 0L
     private var rowGeneration = 0L
     private var rowsReady = false
+    private var rowsFailed = false
     private var posterStatus = 0
     var report: (Int) -> Unit = {}
 
@@ -44,6 +45,8 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
     private fun replaceRows(lines: List<MonetTickerLine>) {
         resetTicker()
         if (lines.isEmpty()) return
+        val prepareStarted = android.os.SystemClock.uptimeMillis()
+        android.util.Log.i("FoliaLyrics", "Preparing ${lines.size} received lyric lines")
         // Keep the original row pools, spring chain and parse executor across songs.
         val view = ticker ?: NowPlayingLyricsTickerView(context).also {
             ticker = it
@@ -54,20 +57,31 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
         }
         placeTicker()
         view.setPlaybackState(position, playing && active, true)
-        view.setMonetLines(lines)
         val generation = rowGeneration
+        view.setOnLyricsErrorListener {
+            if (generation == rowGeneration) {
+                view.setOnRowsReadyListener(null)
+                rowsReady = false
+                rowsFailed = true
+                poster.setTickerReady(false)
+                publish()
+            }
+        }
         view.setOnRowsReadyListener {
             if (generation == rowGeneration && !view.isLyricsParsePending && view.hasPreparedRows()) {
                 view.setOnRowsReadyListener(null)
                 view.setPlaybackState(position, playing && active, true)
                 view.prepareForRevealFrame {
-                    if (generation == rowGeneration) {
+                    if (generation == rowGeneration && !rowsFailed) {
                         rowsReady = true
+                        android.util.Log.i("FoliaLyrics", "Lyric rows ready in ${android.os.SystemClock.uptimeMillis() - prepareStarted} ms")
+                        poster.setTickerReady(true)
                         publish()
                     }
                 }
             }
         }
+        view.setMonetLines(lines)
     }
 
     private fun placeTicker() {
@@ -115,18 +129,32 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
                 if (shown) view.setPlaybackState(position, playing, true)
             }
         }
-        report(if (posterStatus == 1 && !rowsReady) 0 else posterStatus)
+        report(when {
+            posterStatus == 1 && rowsFailed -> 5
+            posterStatus == 1 && !rowsReady -> 0
+            else -> posterStatus
+        })
     }
 
     private fun resetTicker() {
         rowGeneration++
         rowsReady = false
+        rowsFailed = false
+        poster.setTickerReady(false)
         ticker?.let { view ->
             view.setOnRowsReadyListener(null)
+            view.setOnLyricsErrorListener(null)
             view.setTickerEnabled(false)
             view.cancelPendingLyricsWork()
             view.visibility = View.INVISIBLE
         }
+    }
+
+    fun retryLyrics() {
+        resetTicker()
+        posterStatus = 0
+        publish()
+        poster.retryLyrics()
     }
 
     fun release() {

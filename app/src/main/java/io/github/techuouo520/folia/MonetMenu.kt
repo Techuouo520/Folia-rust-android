@@ -8,7 +8,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -33,7 +32,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.techuouo520.folia.bridge.MonetOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -127,8 +125,7 @@ internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean) {
     val frame = remember { mutableIntStateOf(0) }
     var geometry by remember { mutableIntStateOf(0) }
     val moving by remember { derivedStateOf { frame.intValue; !motion.docked } }
-    val label = if (dark) "MIDNIGHT DEFAULT" else "DAYLIGHT DEFAULT"
-    val dockWidth = if (options.showDescription) 170.dp else 48.dp
+    val dockWidth = 48.dp
     val dockHeight = 48.dp
     SideEffect { motion.dockBounds(CornerRect(0f, 0f, dockWidth.value, dockHeight.value)) }
     LaunchedEffect(open, pressed, geometry, dockWidth) {
@@ -162,19 +159,21 @@ internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean) {
         CornerBubble(modifier = Modifier.absoluteOffset { IntOffset(inset.floatValue.roundToInt(), -lift.floatValue.roundToInt()) }
             .padding(bottom = 12.dp),
             attachedToPlayer = true, motion = motion, frame = frame, active = open || moving, right = false, frost = null, dark = dark,
-            avatar = null, label = "莫奈歌词设置", title = "莫奈歌词设置", dockWidth = dockWidth, dockHeight = dockHeight,
+            avatar = null, label = "歌词设置", title = "歌词设置", dockWidth = dockWidth, dockHeight = dockHeight,
             artworkPlaceholder = {
-                Row(Modifier.fillMaxSize().border(1.dp, ink.copy(alpha = .16f), CircleShape),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                    if (options.showDescription) {
-                        Box(Modifier.size(9.dp).background(if (dark) ink else Color(0xFFEA580C), CircleShape))
-                        Spacer(Modifier.width(10.dp))
-                        Text(label, color = ink, fontSize = 12.sp, maxLines = 1)
-                    } else Image(painterResource(R.drawable.salam_settings), null, Modifier.size(21.dp), colorFilter = ColorFilter.tint(ink))
+                Box(
+                    Modifier.fillMaxSize().border(1.dp, ink.copy(alpha = .14f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        painterResource(R.drawable.lyrics_settings),
+                        contentDescription = null,
+                        modifier = Modifier.size(21.dp),
+                        colorFilter = ColorFilter.tint(ink),
+                    )
                 }
             }, onPressed = { pressed = it }, onGeometryChanged = { Snapshot.withoutReadObservation { geometry++ } },
             onClick = { open = !open }) {
-            MonetSwitch("显示主题说明", options.showDescription) { settings.update(options.copy(showDescription = it)) }
             MonetSwitch("显示肖像拖动柄", options.showHanger) { settings.update(options.copy(showHanger = it)) }
             MonetSwitch("显示音频频谱", options.showSpectrum) { settings.update(options.copy(showSpectrum = it)) }
             if (options.showSpectrum) MonetChoice("频谱样式", "柱状", "曲线", options.lineSpectrum) {

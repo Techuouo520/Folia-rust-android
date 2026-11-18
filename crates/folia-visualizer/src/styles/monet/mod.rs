@@ -120,7 +120,9 @@ impl crate::SceneState {
     /// The Android worker paints a full-screen stage in logical pixels. Other stage placements
     /// continue using the canvas implementation (including standalone previews).
     pub fn begin_monet_rail(&self, density: f32, filter: MaskFilter) {
-        self.monet.borrow_mut().gpu.get_or_insert_with(Default::default).get_mut().begin(density, filter);
+        let mut cache = self.monet.borrow_mut();
+        cache.raster_density = Some(density);
+        cache.gpu.get_or_insert_with(Default::default).get_mut().begin(density, filter);
     }
 
     pub fn monet_ticker_bounds(&self) -> Option<[f32; 6]> {

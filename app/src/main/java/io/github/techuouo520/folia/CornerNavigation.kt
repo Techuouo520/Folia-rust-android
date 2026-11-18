@@ -10,13 +10,22 @@ internal class CornerNavigation {
     private var album by mutableStateOf<AlbumCamera?>(null)
     var modalOpen by mutableStateOf(false)
     var playerVisible by mutableStateOf(false)
-    val insideAlbum get() = album?.entering == true
+    var playerLyricsOpen by mutableStateOf(false)
+        private set
+    val insideAlbum get() = playerLyricsOpen || album?.entering == true
     val expanded get() = (insideAlbum || entry?.openRequested == true) && !playerVisible
     fun attach(owner: CollectionEntry) { entry=owner }
     fun detach(owner: CollectionEntry) { if(entry===owner) entry=null }
     fun attach(owner: AlbumCamera) { album=owner }
     fun detach(owner: AlbumCamera) { if(album===owner) album=null }
+    fun openPlayerLyrics() {
+        if (album?.entering != true) playerLyricsOpen = true
+    }
     fun back() {
+        if (playerLyricsOpen) {
+            playerLyricsOpen = false
+            return
+        }
         val camera=album
         if(camera?.entering==true) camera.entering=false else entry?.openRequested=false
     }

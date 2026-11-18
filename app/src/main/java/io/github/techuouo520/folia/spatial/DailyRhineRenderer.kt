@@ -58,6 +58,8 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
     private val opaqueMode:Int
     private val opaqueCovers:Int
     private val opaquePreviews:Int
+    private val opaqueCoverBlend:Int
+    private var coverBlend = FloatArray(100) { 1f }
     private var targetExterior:Boolean = false
     private var opaqueBackground:Boolean = false
     private val depthScreen:Int
@@ -100,6 +102,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         val outputMode:Int
         val sceneTexel:Int
         val samplers:IntArray = IntArray(8)
+        val coverBlend:Int
         init{
             screen = GLES30.glGetUniformLocation(program, "u_screen")
             pixels = GLES30.glGetUniformLocation(program, "u_pixels")
@@ -120,8 +123,9 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             hdrReach = GLES30.glGetUniformLocation(program, "u_hdr_reach")
             outputMode = GLES30.glGetUniformLocation(program, "u_output_mode")
             sceneTexel = GLES30.glGetUniformLocation(program, "u_scene_texel")
+            coverBlend = GLES30.glGetUniformLocation(program, "u_cover_blend[0]")
             val names = arrayOf<String>("u_covers", "u_previews", "u_scene", "u_depth", "u_soft", "u_far", "u_context", "u_frost_scene")
-            for (i in names!!.indices) samplers[i] = GLES30.glGetUniformLocation(program, names!![i])
+            for (i in names.indices) samplers[i] = GLES30.glGetUniformLocation(program, names[i])
         }
     }
     init{
@@ -155,6 +159,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         opaqueMode = opaqueLocation("u_material_mode")
         opaqueCovers = opaqueLocation("u_covers")
         opaquePreviews = opaqueLocation("u_previews")
+        opaqueCoverBlend = opaqueLocation("u_cover_blend[0]")
         val rv = shader(context, GLES30.GL_VERTEX_SHADER, "shaders/daily_rhine.vert")
         val rf = shader(context, GLES30.GL_FRAGMENT_SHADER, "shaders/daily_rhine.frag", "#define RHINE_RIM_PASS\n")
         rimProgram = GLES30.glCreateProgram()
@@ -213,8 +218,8 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             val n = (packed.ushr(32)).toInt()
             if (packed < 0 || vertices <= 0 || vertices > MESH_FLOATS / 6 || n <= 0 || n > MESH_FLOATS / 6 || n % 3 != 0) throw IllegalStateException("Rhine indexed mesh unavailable")
             meshCounts[k] = n
-            mesh!!.position(0)
-            indices!!.position(0)
+            mesh.position(0)
+            indices.position(0)
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, meshBuffers[k])
             GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, vertices * 6 * 4, mesh, GLES30.GL_STATIC_DRAW)
             vao(backgroundVaos[k], meshBuffers[k], meshIndexBuffers[k], backgroundBuffer)
@@ -280,7 +285,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         changed = changed or !backgroundPacked
         for (i in BACKGROUND_PARAMETERS!!.indices)
         {
-            val bits = frame!!.getInt((DailySpatialProtocol.RHINE + BACKGROUND_PARAMETERS!![i]) * 4)
+            val bits = frame.getInt((DailySpatialProtocol.RHINE + BACKGROUND_PARAMETERS[i]) * 4)
             val parameterChanged = bits != backgroundParameterBits[i]
             changed = changed or parameterChanged
             refractionSourceDirty = refractionSourceDirty or parameterChanged
@@ -292,6 +297,9 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
 
     fun invalidateRefractionSource() {
         refractionSourceDirty = true
+    }
+    fun setCoverBlend(values: FloatArray) {
+        coverBlend = values
     }
     fun updateForeground(frame:ByteBuffer?, bindings:ByteBuffer?) {
         foregroundCount = SpatialNative.dailyRhinePack((frame)!!, (bindings)!!, (foregroundBytes)!!, true)
@@ -322,28 +330,29 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         activeUniforms = u
         val a = DailySpatialProtocol.ACTION
         GLES30.glUseProgram(u!!.program)
-        GLES30.glUniform2f(u!!.sceneTexel, 1f / textureWidth, 1f / textureHeight)
-        GLES30.glUniform1f(u!!.hdr, if (hdrSurface) hdrHeadroom else 1f)
-        GLES30.glUniform1f(u!!.hdrReach, if (hdrSurface) hdrReach else 1f)
-        GLES30.glUniform1f(u!!.outputMode, (0).toFloat())
-        GLES30.glUniform4f(u!!.keyLight, frame!![DailySpatialProtocol.RHINE + 8], frame!![DailySpatialProtocol.RHINE + 9], frame!![DailySpatialProtocol.RHINE + 10], frame!![DailySpatialProtocol.RHINE + 11])
-        GLES30.glUniform1f(u!!.materialMode, frame!![DailySpatialProtocol.RHINE + 5])
-        GLES30.glUniform2f(u!!.materialGeometry, frame!![DailySpatialProtocol.RHINE + 13], frame!![DailySpatialProtocol.RHINE + 14])
-        GLES30.glUniform1f(u!!.frostRadius, frame!![DailySpatialProtocol.RHINE + 6])
-        GLES30.glUniform2f(u!!.screen, (if (front) width else textureWidth) / density, (if (front) height else textureHeight) / density)
-        GLES30.glUniform2f(u!!.pixels, (if (front) width else textureWidth).toFloat(), (if (front) height else textureHeight).toFloat())
-        GLES30.glUniform2f(u!!.projectionOffset, (if (front) 0 else padX / density).toFloat(), (if (front) 0 else padY / density).toFloat())
-        GLES30.glUniform4f(u!!.sceneRect, padX / textureWidth.toFloat(), padY / textureHeight.toFloat(), width / textureWidth.toFloat(), height / textureHeight.toFloat())
-        GLES30.glUniform2f(u!!.origin, (left).toFloat(), (bottom).toFloat())
-        GLES30.glUniform1f(u!!.dark, (if (isDark) 1 else 0).toFloat())
-        GLES30.glUniform1f(u!!.foreground, (if (front) 1 else 0).toFloat())
-        GLES30.glUniform1f(u!!.blur, frame!![a + 1])
-        GLES30.glUniform1f(u!!.backgroundScale, frame!![a + 127])
-        GLES30.glUniform4f(u!!.policy, frame!![26], frame!![27], frame!![28], frame!![30])
+        if (u.coverBlend >= 0) GLES30.glUniform4fv(u.coverBlend, coverBlend.size / 4, coverBlend, 0)
+        GLES30.glUniform2f(u.sceneTexel, 1f / textureWidth, 1f / textureHeight)
+        GLES30.glUniform1f(u.hdr, if (hdrSurface) hdrHeadroom else 1f)
+        GLES30.glUniform1f(u.hdrReach, if (hdrSurface) hdrReach else 1f)
+        GLES30.glUniform1f(u.outputMode, (0).toFloat())
+        GLES30.glUniform4f(u.keyLight, frame!![DailySpatialProtocol.RHINE + 8], frame[DailySpatialProtocol.RHINE + 9], frame[DailySpatialProtocol.RHINE + 10], frame[DailySpatialProtocol.RHINE + 11])
+        GLES30.glUniform1f(u.materialMode, frame[DailySpatialProtocol.RHINE + 5])
+        GLES30.glUniform2f(u.materialGeometry, frame[DailySpatialProtocol.RHINE + 13], frame[DailySpatialProtocol.RHINE + 14])
+        GLES30.glUniform1f(u.frostRadius, frame[DailySpatialProtocol.RHINE + 6])
+        GLES30.glUniform2f(u.screen, (if (front) width else textureWidth) / density, (if (front) height else textureHeight) / density)
+        GLES30.glUniform2f(u.pixels, (if (front) width else textureWidth).toFloat(), (if (front) height else textureHeight).toFloat())
+        GLES30.glUniform2f(u.projectionOffset, (if (front) 0 else padX / density).toFloat(), (if (front) 0 else padY / density).toFloat())
+        GLES30.glUniform4f(u.sceneRect, padX / textureWidth.toFloat(), padY / textureHeight.toFloat(), width / textureWidth.toFloat(), height / textureHeight.toFloat())
+        GLES30.glUniform2f(u.origin, (left).toFloat(), (bottom).toFloat())
+        GLES30.glUniform1f(u.dark, (if (isDark) 1 else 0).toFloat())
+        GLES30.glUniform1f(u.foreground, (if (front) 1 else 0).toFloat())
+        GLES30.glUniform1f(u.blur, frame[a + 1])
+        GLES30.glUniform1f(u.backgroundScale, frame[a + 127])
+        GLES30.glUniform4f(u.policy, frame[26], frame[27], frame[28], frame[30])
     }
     fun background(frame:FloatArray?, density:Float, isDark:Boolean, target:Int, coverTexture:Int, previewTexture:Int, sceneColor:Int, w:Int, h:Int, px:Int, py:Int) {
-        val matte = Math.abs(frame!![DailySpatialProtocol.RHINE + 5] - 1f) < .1f || Math.abs(frame!![DailySpatialProtocol.RHINE + 5] - 3f) < .1f
-        val exterior = frame!![DailySpatialProtocol.RHINE + 5] > 1.5f
+        val matte = Math.abs(frame!![DailySpatialProtocol.RHINE + 5] - 1f) < .1f || Math.abs(frame[DailySpatialProtocol.RHINE + 5] - 3f) < .1f
+        val exterior = frame[DailySpatialProtocol.RHINE + 5] > 1.5f
         targets(w, h, px, py, !matte, hdrSurface && hdrHeadroom > 1f, exterior, sceneColor)
         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
         GLES30.glEnable(GLES30.GL_BLEND)
@@ -370,7 +379,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             GLES30.glUniform1f(activeUniforms!!.surface, (1).toFloat())
             GLES30.glBindVertexArray(backgroundVaos[1])
             GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[1], GLES30.GL_UNSIGNED_SHORT, 0, count)
-            if (frame!![DailySpatialProtocol.RHINE + 5] > 2.5f) {
+            if (frame[DailySpatialProtocol.RHINE + 5] > 2.5f) {
                 GLES30.glUniform1f(activeUniforms!!.surface, (2).toFloat())
                 GLES30.glBindVertexArray(backgroundVaos[3])
                 GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[3], GLES30.GL_UNSIGNED_SHORT, 0, count)
@@ -393,12 +402,12 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             if (opaqueBackground)
             {
                 beginDepth(density)
-                if (frame!![DailySpatialProtocol.RHINE + 5] > 3.5f) drawBackgroundMesh(4)
+                if (frame[DailySpatialProtocol.RHINE + 5] > 3.5f) drawBackgroundMesh(4)
                 drawBackgroundMesh(3)
                 endDepth()
             }
             bindOpaque(frame, density, isDark, coverTexture, previewTexture)
-            if (frame!![DailySpatialProtocol.RHINE + 5] > 3.5f) {
+            if (frame[DailySpatialProtocol.RHINE + 5] > 3.5f) {
                 GLES30.glUniform1f(opaqueSurface, (0).toFloat())
                 GLES30.glBindVertexArray(backgroundVaos[4])
                 GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[4], GLES30.GL_UNSIGNED_SHORT, 0, count)
@@ -421,7 +430,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             // core/print source. Keep its exact Gaussian result while they move.
             if (refractionSourceDirty)
             {
-                filterRefraction(sceneColor, frame!![DailySpatialProtocol.RHINE + 6], density)
+                filterRefraction(sceneColor, frame[DailySpatialProtocol.RHINE + 6], density)
                 refractionSourceDirty = false
             }
         }
@@ -441,7 +450,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         GLES30.glViewport(0, 0, textureWidth, textureHeight)
         GLES30.glEnable(GLES30.GL_DEPTH_TEST)
         GLES30.glEnable(GLES30.GL_CULL_FACE)
-        val shell = if (frame!![DailySpatialProtocol.RHINE + 5] > 3.5f) 6 else 1
+        val shell = if (frame[DailySpatialProtocol.RHINE + 5] > 3.5f) 6 else 1
         // Source depth stays immutable for refraction. Reconstruct final depth instead
         // of copying it: same vertices and invariant gl_Position, no colour writes or
         // optical work. sceneColor already contains the source through the shared FBO.
@@ -449,12 +458,12 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         {
             beginDepth(density)
             GLES30.glClear(GLES30.GL_DEPTH_BUFFER_BIT)
-            if (frame!![DailySpatialProtocol.RHINE + 5] > 3.5f) drawBackgroundMesh(4)
+            if (frame[DailySpatialProtocol.RHINE + 5] > 3.5f) drawBackgroundMesh(4)
             drawBackgroundMesh(3)
             drawBackgroundMesh(shell)
             endDepth()
         }
-        uniforms(frame, density, isDark, 0, 0, false, frame!![DailySpatialProtocol.RHINE + 5] > 3.5f)
+        uniforms(frame, density, isDark, 0, 0, false, frame[DailySpatialProtocol.RHINE + 5] > 3.5f)
         // The colour pass samples distinct Gaussian/depth targets; no framebuffer feedback.
         textures(coverTexture, previewTexture, if (exterior) previewTexture else opaqueColor, opaqueDepth, previewTexture, previewTexture, previewTexture)
         GLES30.glUniform1f(activeUniforms!!.surface, (1).toFloat())
@@ -485,7 +494,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         GLES30.glUniform2f(backdropScreen, textureWidth / density, textureHeight / density)
         GLES30.glUniform2f(backdropOffset, padX / density, padY / density)
         val r = DailySpatialProtocol.RHINE
-        GLES30.glUniform4f(backdropLight, frame!![r + 8], frame!![r + 9], frame!![r + 10], frame!![r + 11])
+        GLES30.glUniform4f(backdropLight, frame!![r + 8], frame[r + 9], frame[r + 10], frame[r + 11])
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
         GLES30.glDepthMask(true)
         GLES30.glEnable(GLES30.GL_CULL_FACE)
@@ -512,13 +521,14 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
 
     private fun bindOpaque(frame:FloatArray?, density:Float, isDark:Boolean, covers:Int, previews:Int) {
         GLES30.glUseProgram(opaqueProgram)
+        GLES30.glUniform4fv(opaqueCoverBlend, coverBlend.size / 4, coverBlend, 0)
         GLES30.glUniform2f(opaqueScreen, textureWidth / density, textureHeight / density)
         GLES30.glUniform2f(opaqueProjection, padX / density, padY / density)
         GLES30.glUniform1f(opaqueDark, (if (isDark) 1 else 0).toFloat())
         GLES30.glUniform1f(opaqueHdr, if (hdrSurface) hdrHeadroom else 1f)
         GLES30.glUniform1f(opaqueMode, frame!![DailySpatialProtocol.RHINE + 5])
         val r = DailySpatialProtocol.RHINE
-        GLES30.glUniform4f(opaqueLight, frame!![r + 8], frame!![r + 9], frame!![r + 10], frame!![r + 11])
+        GLES30.glUniform4f(opaqueLight, frame[r + 8], frame[r + 9], frame[r + 10], frame[r + 11])
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D_ARRAY, covers)
         GLES30.glUniform1i(opaqueCovers, 0)
@@ -546,7 +556,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             GLES30.glBindVertexArray(foregroundVaos[4])
             GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[4], GLES30.GL_UNSIGNED_SHORT, 0, foregroundCount)
         }
-        if (frame!![DailySpatialProtocol.RHINE + 5] < .5f) {
+        if (frame[DailySpatialProtocol.RHINE + 5] < .5f) {
             GLES30.glUniform1f(activeUniforms!!.surface, (0).toFloat())
             GLES30.glBindVertexArray(foregroundVaos[0])
             GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[0], GLES30.GL_UNSIGNED_SHORT, 0, foregroundCount)
@@ -554,7 +564,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         GLES30.glUniform1f(activeUniforms!!.surface, (1).toFloat())
         GLES30.glBindVertexArray(foregroundVaos[2])
         GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[2], GLES30.GL_UNSIGNED_SHORT, 0, foregroundCount)
-        if (frame!![DailySpatialProtocol.RHINE + 5] > 1.5f) {
+        if (frame[DailySpatialProtocol.RHINE + 5] > 1.5f) {
             GLES30.glUniform1f(activeUniforms!!.surface, (2).toFloat())
             GLES30.glBindVertexArray(foregroundVaos[3])
             GLES30.glDrawElementsInstanced(GLES30.GL_TRIANGLES, meshCounts[3], GLES30.GL_UNSIGNED_SHORT, 0, foregroundCount)
@@ -637,7 +647,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         attachedSceneColor = if (exterior) sceneColor else 0
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, if (exterior) sceneColor else opaqueColor, 0)
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_DEPTH_ATTACHMENT, GLES30.GL_TEXTURE_2D, opaqueDepth, 0)
-        if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) !== GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Rhine refraction target incomplete")
+        if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Rhine refraction target incomplete")
         frostWidth = Math.max(1, (textureWidth + 1) / 2)
         frostHeight = Math.max(1, (textureHeight + 1) / 2)
         GLES30.glGenFramebuffers(2, frostFbos, 0)
@@ -645,7 +655,7 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
             frostTextures[i] = texture(frostWidth, frostHeight, false)
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, frostFbos[i])
             GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, frostTextures[i], 0)
-            if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) !== GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Glass filter target incomplete")
+            if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) throw IllegalStateException("Glass filter target incomplete")
         }
 
     }
@@ -704,10 +714,10 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         private fun upload(buffer:Int, floats:FloatBuffer?, count:Int) {
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, buffer)
             floats!!.position(0)
-            floats!!.limit(count * INSTANCE)
+            floats.limit(count * INSTANCE)
             GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, Math.max(INSTANCE, count * INSTANCE) * 4, null, GLES30.GL_STREAM_DRAW)
             if (count > 0) GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, count * INSTANCE * 4, floats)
-            floats!!.clear()
+            floats.clear()
         }
     }
 }

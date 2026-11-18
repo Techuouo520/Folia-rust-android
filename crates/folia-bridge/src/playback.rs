@@ -74,6 +74,9 @@ struct Playback {
     loading: bool,
     quality: AudioQuality,
     lyrics: Option<(i64, Arc<Lyrics>)>,
+    lyrics_generation: u64,
+    lyrics_loading: bool,
+    lyrics_failed: bool,
     audio_fetch: AudioFetch,
     lyrics_fetch: LyricsFetch,
     checkpoint: PathBuf,
@@ -103,6 +106,9 @@ impl Playback {
             loading: false,
             quality: AudioQuality::High,
             lyrics: None,
+            lyrics_generation: 0,
+            lyrics_loading: false,
+            lyrics_failed: false,
             audio_fetch,
             lyrics_fetch,
             checkpoint, last_save:std::time::Instant::now(),
@@ -124,7 +130,14 @@ impl Playback {
             return;
         }
         self.last_save = std::time::Instant::now();
-        let Some(index) = self.queue.current_index() else { return };
+        let Some(index) = self.queue.current_index() else {
+            if !self.last_checkpoint.as_ref().is_some_and(|bytes| bytes.is_empty())
+                && let Err(error) = self.clear_checkpoint()
+            {
+                tracing::warn!(%error, "empty playback checkpoint cleanup failed");
+            }
+            return;
+        };
         let state = ResumeState {
             version: 1,
             tracks: self.queue.items().to_vec(),
@@ -154,6 +167,22 @@ impl Playback {
         }
     }
 
+    fn clear_checkpoint(&mut self) -> Result<(), BridgeError> {
+        let temporary = self.checkpoint.with_extension("tmp");
+        for path in [&self.checkpoint, &temporary] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(BridgeError::Playback {
+                    reason: format!("cannot clear saved playback: {error}"),
+                }),
+            }
+        }
+        // An empty marker avoids repeating filesystem work while the queue stays empty.
+        self.last_checkpoint = Some(Vec::new());
+        Ok(())
+    }
+
     // Mutate queue ownership on the playback thread without restarting the current decoder.
     fn enqueue_next(&mut self, tracks: Vec<LibraryTrack>) -> Result<(), BridgeError> {
         if tracks.is_empty() { return Ok(()); }
@@ -177,6 +206,7 @@ impl Playback {
                 reply_send(reply, if current { self.seek(seconds) } else { Ok(()) });
             }
             Command::Stop(reply) => reply_send(reply, self.stop()),
+            Command::ClearQueue(reply) => reply_send(reply, self.clear_queue()),
             Command::SetVolume { volume, reply } => reply_send(reply, self.set_volume(volume)),
             Command::Volume(reply) => reply_send(reply, Ok(self.volume())),
             Command::Status(reply) => reply_send(reply, self.status()),
@@ -190,8 +220,17 @@ impl Playback {
             Command::PlayTracks { tracks, start, reply } => reply_send(reply, self.play_all(tracks, start)),
             Command::SetQuality { quality, reply } => reply_send(reply, self.set_quality(quality)),
             Command::Lyrics(reply) => reply_send(reply, Ok(self.lyric_view())),
+            #[cfg(target_os = "android")]
+            Command::RequestLyrics { id, provider, online_id, retry } => {
+                if self.queue.current().is_some_and(|track| {
+                    track.id == id && track.provider == provider && track.online_id == online_id
+                }) {
+                    self.ensure_lyrics(retry);
+                }
+            }
             Command::Loaded { token, result } => self.loaded(token, result),
-            Command::LyricsReady { token, id, lyrics } if token == self.token => self.store_lyrics(id, lyrics),
+            Command::LyricsReady { token, generation, id, result }
+                if token == self.token && generation == self.lyrics_generation => self.store_lyrics(id, result),
             Command::LyricsReady { .. } => {},
             Command::Shutdown => {}
         }
@@ -253,11 +292,36 @@ impl Playback {
 
     fn stop(&mut self) -> Result<(), BridgeError> {
         self.token=self.token.wrapping_add(1);self.loading=false;self.want_play=false;
+        self.lyrics_loading = false;
         self.restored=true;self.position_on_load=0.0;
         if let Some(player) = self.player.as_ref() {
             player.stop();
         }
+        self.ensure_lyrics(false);
         tracing::info!("playback stopped");
+        Ok(())
+    }
+
+    fn clear_queue(&mut self) -> Result<(), BridgeError> {
+        self.token = self.token.wrapping_add(1);
+        self.lyrics_generation = self.lyrics_generation.wrapping_add(1);
+        self.generation = self.generation.wrapping_add(1);
+        self.loading = false;
+        self.lyrics_loading = false;
+        self.lyrics_failed = false;
+        self.lyrics = None;
+        self.want_play = false;
+        self.restored = false;
+        self.recovering = false;
+        self.position_on_load = 0.0;
+        self.failures = 0;
+        self.queue.replace(Vec::new(), 0);
+        if let Some(player) = self.player.take() {
+            player.stop();
+        }
+        self.last_checkpoint = None;
+        self.clear_checkpoint()?;
+        tracing::info!("playback queue cleared");
         Ok(())
     }
 
@@ -377,6 +441,8 @@ impl Playback {
         self.restored=false;
         self.token = self.token.wrapping_add(1);
         self.lyrics = None;
+        self.lyrics_loading = false;
+        self.lyrics_failed = false;
         self.loading = true;
         if let Some(player) = self.player.as_ref() {
             player.stop();
@@ -446,7 +512,21 @@ impl Playback {
         }
     }
 
+    fn ensure_lyrics(&mut self, retry: bool) {
+        if self.lyrics_loading || (!retry && (self.lyrics.is_some() || self.lyrics_failed)) {
+            return;
+        }
+        if let Some(track) = self.queue.current().cloned() {
+            self.spawn_lyrics(&track);
+        }
+    }
+
     fn spawn_lyrics(&mut self, track: &Queued) {
+        self.lyrics_generation = self.lyrics_generation.wrapping_add(1);
+        self.lyrics_loading = true;
+        self.lyrics_failed = false;
+        self.lyrics = None;
+        let generation = self.lyrics_generation;
         let token = self.token;
         let id = track.id;
         let path = track.path.clone();
@@ -455,31 +535,43 @@ impl Playback {
         let fetch = Arc::clone(&self.lyrics_fetch);
         let commands = self.commands.clone();
         let spawned = std::thread::Builder::new().name("folia-lyrics".into()).spawn(move || {
-            let lyrics = if provider.is_empty() || song.is_empty() {
-                folia_library::lyrics_for(&path)
+            let result = if provider.is_empty() || song.is_empty() {
+                Ok(folia_library::lyrics_for(&path))
             } else {
-                fetch(&provider, &song).ok().flatten()
+                fetch(&provider, &song)
             };
-            if commands.send(Command::LyricsReady { token, id, lyrics }).is_err() {
+            if commands.send(Command::LyricsReady { token, generation, id, result }).is_err() {
                 tracing::warn!("playback thread dropped lyrics");
             }
         });
         if let Err(error) = spawned {
-            self.store_lyrics(id, None);
+            self.store_lyrics(id, Err(error.to_string()));
             tracing::error!(error = &error as &dyn std::error::Error, "cannot start lyric loading");
         }
     }
 
-    fn store_lyrics(&mut self, id: i64, lyrics: Option<Lyrics>) {
+    fn store_lyrics(&mut self, id: i64, result: Result<Option<Lyrics>, String>) {
         if self.queue.current().is_some_and(|track| track.id == id) {
-            self.lyrics = Some((id, Arc::new(lyrics.unwrap_or_default())));
-            tracing::info!(id, ready = self.lyrics.is_some(), "lyrics stored");
+            self.lyrics_loading = false;
+            match result {
+                Ok(lyrics) => {
+                    self.lyrics_failed = false;
+                    self.lyrics = Some((id, Arc::new(lyrics.unwrap_or_default())));
+                    tracing::info!(id, "lyrics stored");
+                }
+                Err(error) => {
+                    self.lyrics_failed = true;
+                    self.lyrics = None;
+                    tracing::warn!(id, error, "lyrics could not be loaded");
+                }
+            }
         }
     }
 
     fn lyric_view(&mut self) -> crate::LyricSnapshot {
         self.pump().ok();
-        let position = self.player.as_ref().map(Player::status).map(|status| status.position).unwrap_or(0.0);
+        self.ensure_lyrics(false);
+        let position = self.snapshot().position_seconds;
         let Some((id, lyrics)) = &self.lyrics else {
             return crate::LyricSnapshot { line_index: -1, word_index: -1, lines: Vec::new() };
         };
@@ -585,6 +677,7 @@ enum Command {
     Pause(Sender<Result<(), BridgeError>>),
     Seek { seconds: f64, owner: Option<(i64,i32)>, reply: Sender<Result<(), BridgeError>> },
     Stop(Sender<Result<(), BridgeError>>),
+    ClearQueue(Sender<Result<(), BridgeError>>),
     SetVolume { volume: f32, reply: Sender<Result<(), BridgeError>> },
     Volume(Sender<Result<f32, BridgeError>>),
     Status(Sender<Result<PlaybackSnapshot, BridgeError>>),
@@ -597,9 +690,11 @@ enum Command {
     PlayTracks { tracks: Vec<LibraryTrack>, start: i32, reply: Sender<Result<(), BridgeError>> },
     SetQuality { quality: AudioQuality, reply: Sender<Result<(), BridgeError>> },
     Lyrics(Sender<Result<crate::LyricSnapshot, BridgeError>>),
+    #[cfg(target_os = "android")]
+    RequestLyrics { id: i64, provider: String, online_id: String, retry: bool },
     Shutdown,
     Loaded { token: u64, result: Result<PathBuf, String> },
-    LyricsReady { token: u64, id: i64, lyrics: Option<Lyrics> },
+    LyricsReady { token: u64, generation: u64, id: i64, result: Result<Option<Lyrics>, String> },
 }
 
 #[cfg(target_os = "android")]
@@ -611,13 +706,16 @@ impl Playback {
         let mut slot = feed.lock();
         let Some(track) = self.queue.current() else { *slot = None; return };
         let lyrics = self.lyrics.as_ref().map(|(_, lyrics)| lyrics);
+        let player = self.player.as_ref().filter(|_| !self.restored && !self.loading);
         let same = slot.as_ref().is_some_and(|old| old.token == self.token &&
             std::path::Path::new(&old.track.path) == track.path &&
-            match (&old.clock, &self.player) { (Some(c), Some(p)) => c.belongs_to(p), (None,None) => true, _ => false } &&
+            old.lyrics_failed == self.lyrics_failed && old.position == self.position_on_load &&
+            match (&old.clock, player) { (Some(c), Some(p)) => c.belongs_to(p), (None,None) => true, _ => false } &&
             match (&old.lyrics, lyrics) { (Some(a),Some(b)) => Arc::ptr_eq(a,b), (None,None) => true, _ => false });
         if !same {
             *slot = Some(Arc::new(crate::monet::Input { token: self.token, track: track.to_track(),
-                lyrics: lyrics.cloned(), clock: self.player.as_ref().map(Player::clock) }));
+                lyrics: lyrics.cloned(), lyrics_failed: self.lyrics_failed, position: self.position_on_load,
+                clock: player.map(Player::clock) }));
         }
     }
 }
@@ -675,6 +773,10 @@ impl PlaybackHost {
         self.roundtrip(Command::Stop)
     }
 
+    pub(crate) fn clear_queue(&self) -> Result<(), BridgeError> {
+        self.roundtrip(Command::ClearQueue)
+    }
+
     pub(crate) fn set_volume(&self, volume: f32) -> Result<(), BridgeError> {
         self.roundtrip(|reply| Command::SetVolume { volume, reply })
     }
@@ -728,6 +830,16 @@ impl PlaybackHost {
 
     pub(crate) fn lyrics(&self) -> Result<crate::LyricSnapshot, BridgeError> {
         self.roundtrip(Command::Lyrics)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn request_lyrics(&self, id: i64, provider: String, online_id: String, retry: bool) {
+        let guard = self.commands.lock();
+        if let Some(commands) = guard.as_ref()
+            && commands.send(Command::RequestLyrics { id, provider, online_id, retry }).is_err()
+        {
+            tracing::warn!("playback thread dropped a lyric request");
+        }
     }
 
     fn roundtrip<T>(&self, make: impl FnOnce(Sender<Result<T, BridgeError>>) -> Command) -> Result<T, BridgeError> {

@@ -8,7 +8,7 @@ public class BezierInterpolator implements Interpolator {
     // so the scratch array cannot be re-entered while it is in use.
     private static final ThreadLocal<double[]> WORK = ThreadLocal.withInitial(() -> new double[64]);
 
-    private static strictfp double evaluate(double t, double[] points) {
+    private static double evaluate(double t, double[] points) {
         if (points == null || points.length == 0) return 0.0;
         int count = points.length;
         if (count == 1) return points[0];

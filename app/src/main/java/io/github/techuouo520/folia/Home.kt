@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,7 +37,11 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import io.github.techuouo520.folia.spatial.SceneLabel
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.techuouo520.folia.bridge.CollectionCard
 import io.github.techuouo520.folia.bridge.ExploreCard
 import io.github.techuouo520.folia.bridge.FoliaBridge
@@ -74,6 +77,7 @@ internal fun HomePage(
     notificationsGranted: Boolean,
     onRequestNotifications: () -> Unit,
     onOpenPlayer: () -> Unit,
+    preloadPlayerLyrics: Boolean,
     playerProgress: androidx.compose.runtime.FloatState,
     playerFootprint: androidx.compose.ui.unit.Dp,
     frost: FrostBackdrop,
@@ -85,7 +89,6 @@ internal fun HomePage(
 ) {
     FoliaApp.from(androidx.compose.ui.platform.LocalContext.current).appearanceVersion
     val tab = remember { bridge.homeTab() }
-    var loginOpen by remember { mutableStateOf(false) }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     val session by produceState(initialValue = SessionSnapshot(SessionPhase.RESOLVING, "", "", "", ""), bridge, lifecycle) {
         lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -116,6 +119,8 @@ internal fun HomePage(
         wallItems(tab, shell.tracks, home, signedIn)
     }
     val pageCovered by remember { derivedStateOf { playerProgress.floatValue > .001f } }
+    val navigation = LocalCornerNavigation.current
+    val playerLyricsOpen = navigation?.playerLyricsOpen == true
     val hasPlayer = true
     val bottomSafe=WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val playerInset = playerFootprint + bottomSafe
@@ -124,7 +129,7 @@ internal fun HomePage(
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(modifier = Modifier.fillMaxSize()) {
             Box(modifier = Modifier.fillMaxSize().then(if (hasPlayer) Modifier.frostSource(frost) else Modifier)) {
-                Box(Modifier.fillMaxSize().graphicsLayer {
+                Box(Modifier.fillMaxSize().then(if (playerLyricsOpen) Modifier.clearAndSetSemantics {} else Modifier).graphicsLayer {
                     val p = playerProgress.floatValue
                     scaleX = playerMix(1f,.85f,playerSmooth(0f,1f,p))
                     scaleY = scaleX
@@ -132,9 +137,9 @@ internal fun HomePage(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(screenCorner.dp)
                     clip = p > 0f
                 }) {
-                    CompositionLocalProvider(LocalPlayerCoversPage provides pageCovered) {
+                    CompositionLocalProvider(LocalPlayerCoversPage provides (pageCovered || playerLyricsOpen)) {
                         if (online && session.phase != SessionPhase.SIGNED_IN) {
-                            Guest(bridge, session.phase == SessionPhase.RESOLVING) { loginOpen = true }
+                            Guest(bridge, session.phase == SessionPhase.RESOLVING)
                         } else if (items.isEmpty()) {
                             Text(bridge.t(if (tab == "local") "localMusic.noLocalMusic" else "home.loadingLibrary"), modifier = Modifier.align(Alignment.Center).padding(24.dp))
                         } else {
@@ -156,12 +161,10 @@ internal fun HomePage(
                         }
                     }
                 }
+                PlayerLyricsPage(bridge, shell.playback, playerLyricsOpen, preloadPlayerLyrics)
             }
 
         }
-    }
-    if (loginOpen) {
-        LoginDialog(bridge, onDismiss = { loginOpen = false })
     }
 }
 
@@ -190,15 +193,18 @@ private fun exploreItem(card: ExploreCard): WallItem {
 }
 
 @Composable
-private fun Guest(bridge: FoliaBridge, resolving: Boolean, onLogin: () -> Unit) {
-    Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
-      Column(Modifier.avoidPlayer(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(bridge.t(if (resolving) "home.loading" else "libraryBravaisHome.wallHint.guestTitle"), style = MaterialTheme.typography.titleLarge)
-        if (!resolving) {
-            Text(bridge.t("libraryBravaisHome.connect"), modifier = Modifier.padding(top = 12.dp))
-            Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp)) { Text(bridge.t("libraryBravaisHome.connect")) }
+private fun Guest(bridge: FoliaBridge, resolving: Boolean) {
+    Box(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
+        Column(Modifier.widthIn(max = 320.dp).avoidPlayer(), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(bridge.t(if (resolving) "home.loading" else "libraryBravaisHome.wallHint.guestTitle"),
+                style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+            if (!resolving) {
+                Text(bridge.t("home.connectFromAvatar"), modifier = Modifier.widthIn(max = 280.dp),
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center, lineHeight = 22.sp)
+            }
         }
-      }
     }
 }
 

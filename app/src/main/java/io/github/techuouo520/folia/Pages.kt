@@ -25,11 +25,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,12 +46,17 @@ import io.github.techuouo520.folia.bridge.SearchSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
 fun LoginDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var logoutError by remember { mutableStateOf<String?>(null) }
     val provider = remember { bridge.sessionSnapshot().provider.ifBlank { "netease" } }
-    LaunchedEffect(provider) { withContext(Dispatchers.IO) { bridge.beginLogin(provider) } }
+    val platform = remember(bridge,provider) { bridge.platforms().firstOrNull { it.id == provider } }
+    DisposableEffect(bridge,provider) { onDispose { bridge.cancelLogin() } }
+    LaunchedEffect(provider) { bridge.beginLogin(provider) }
     val login by produceState(initialValue = bridge.loginSnapshot(), provider) {
         while (isActive) {
             value = withContext(Dispatchers.IO) { bridge.loginSnapshot() }
@@ -61,10 +68,11 @@ fun LoginDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(bridge.t("home.loginTitle")) },
+        title = { Text(platform?.loginTitle ?: bridge.t("home.loginTitle")) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(bridge.t("home.loginNote"))
+                Text(platform?.loginNote ?: bridge.t("home.loginNote"))
+                logoutError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (login.width > 0) {
                     Canvas(modifier = Modifier.size(220.dp).background(Color.White)) {
                         val cell = size.minDimension / login.width
@@ -93,7 +101,21 @@ fun LoginDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
         },
         confirmButton = {
             if (bridge.sessionSnapshot().phase == io.github.techuouo520.folia.bridge.SessionPhase.SIGNED_IN) {
-                TextButton(onClick = { bridge.beginLogout(); onDismiss() }) { Text(bridge.t("ui.cancel")) }
+                TextButton(onClick = {
+                    AudioFocus.clearResume()
+                    AudioFocus.abandon()
+                    scope.launch {
+                        try {
+                            withContext(Dispatchers.IO) { bridge.beginLogout() }
+                            onDismiss()
+                        } catch(error: Exception) {
+                            if(error is kotlinx.coroutines.CancellationException) throw error
+                            logoutError = error.message ?: "退出登录失败"
+                        } finally {
+                            PlaybackService.requestRefresh()
+                        }
+                    }
+                }) { Text(bridge.t("ui.cancel")) }
             } else {
                 TextButton(onClick = onDismiss) { Text(bridge.t("home.closeLogin")) }
             }
