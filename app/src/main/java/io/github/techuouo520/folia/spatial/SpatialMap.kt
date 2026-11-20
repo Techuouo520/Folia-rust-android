@@ -350,14 +350,14 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         visible=next;resetClock=true
         hdr.setActive(hdrEnabled&&hdrSupported&&active&&visible,surfaceDisplay)
         if(next) wake() else {
-            main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false
+            main.removeCallbacks(tick);scheduled=false;waitingForUi=false
         }
     }
-    fun suspendRendering() { active=false;resetClock=true;main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close() }
+    fun suspendRendering() { active=false;resetClock=true;main.removeCallbacks(tick);scheduled=false;waitingForUi=false;hdr.close() }
     fun surfaceDetached() {
         cancelPreviewWarm()
         surfaceTexture=null;attached=false;gpuReady=false;ready=false;inFlight=false;resetClock=true
-        main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close()
+        main.removeCallbacks(tick);scheduled=false;waitingForUi=false;hdr.close()
     }
     private var closed=false;private var gpuReady=false
     private var previewWarmGeneration = 0
@@ -369,7 +369,6 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     private var waitingForUi = false
     private var layoutStyle = initialStyle
     private val tick = Runnable { scheduled=false;submit() }
-    private val framePacer = DailySpatialFramePacer({ main.post(it) }) { scheduled=false;submit() }
     val renderer: DailySpatialRenderer=DailySpatialRenderer(context,density,covers,object: DailySpatialRenderer.Listener {
         override fun onReady() { if(!closed) { gpuReady=true;inFlight=false;resetClock=true;reveal() } }
         override fun onHdrReady(supported: Boolean) { hdrSupported=supported;hdr.setActive(hdrEnabled&&supported&&active&&visible,surfaceDisplay) }
@@ -377,7 +376,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         override fun onDirty() { wake() }
         override fun onFrameComplete(values: FloatArray?,swapped: Boolean) {
             inFlight=false
-            if(closed||!attached||!active||!visible) { resetClock=true;framePacer.reset();return }
+            if(closed||!attached||!active||!visible) { resetClock=true;return }
             if(values==null) { dirty=false;if(ready) wake();return }
             // Publish only completed GL data. Each consumer observes its own state clock.
             val worldChanged = frame[A+124]!=values[A+124] || frame[A+4]!=values[A+4] ||
@@ -397,7 +396,6 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             if(worldChanged) backgroundVersion.intValue++
             if(menuChanged) menuVersion++
             drawVersion.intValue++
-            framePacer.started(renderer.frameStartedNanos(),rhineScene)
             val pending=dirty;dirty=false
             pendingOpen?.let { request -> pendingOpen=null;openCollection(request.first,request.second);return }
             if(pending || (frame[0]>0f && swapped)) {
@@ -405,7 +403,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             } else if(frame[0]>0f) {
                 // Match dispatchDraw in the source: UI-only animation cannot spin GL.
                 waitingForUi=true;uiDrawVersion.intValue++
-            } else { resetClock=true;framePacer.reset() }
+            } else { resetClock=true }
         }
     },if(previewLimit<DailySpatialCovers.INITIAL_PREVIEWS) 12 else 96)
     val hdr: DailySpatialHdr=DailySpatialHdr(context,renderer::setHdrHeadroom)
@@ -448,6 +446,9 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         if (closed || !gpuReady || !attached || items.isEmpty() || ready || warmingPreviews) return
         val generation = ++previewWarmGeneration
         warmingPreviews = true
+        // Cached artwork warms in parallel; it must not gate input or the entry animation.
+        ready = true
+        command(3, 1)
         val indices = linkedSetOf<Int>()
         val visibleCount = frame[16].toInt().coerceIn(0, DailySpatialProtocol.SLOTS)
         for (slot in 0 until visibleCount) {
@@ -463,8 +464,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             if (closed || generation != previewWarmGeneration) return@warmCached
             warmingPreviews = false
             if (!gpuReady || !attached) return@warmCached
-            ready = true
-            command(3, 1)
+            wake()
         }
     }
     private fun cancelPreviewWarm() {
@@ -513,14 +513,10 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     }
     private fun submit() {
         if(!ready||!attached||!active||!visible||closed||worldPaused||width<=0||height<=0) {
-            resetClock=true;framePacer.reset();return
+            resetClock=true;return
         }
         if(inFlight) { dirty=true;return }
-        val rhine=rhineScene || layoutStyle==1 || (layoutStyle==0&&height>width)
-        val now=System.nanoTime()
-        val delay=framePacer.remaining(now,rhine)
-        if(delay>0) { scheduled=true;framePacer.schedule(delay);return }
-        framePacer.started(now,rhine)
+        // EGL presentation provides backpressure; retain one frame in flight without an FPS cap.
         submittedCamera=albumCamera
         inFlight=true;renderer.submitMotion(state,width/density,height/density,resetClock);resetClock=false
     }
@@ -578,7 +574,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             // A new card can take ownership while the old card is still folding away.
             resumeReturningMap()
         }
-        main.removeCallbacks(longPress);main.removeCallbacks(tick);framePacer.reset();scheduled=false
+        main.removeCallbacks(longPress);main.removeCallbacks(tick);scheduled=false
         if(inFlight) {pendingOpen=cell to item;return}
         val bounds=collectionBounds(frame,cell,density,width,height)
         actions().preload(item)
@@ -748,7 +744,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     }
     override fun close() {
         if(closed) return
-        closed=true;++epoch;main.removeCallbacksAndMessages(null);framePacer.close();hdr.close();covers.close();dust?.close();velocity?.recycle()
+        closed=true;++epoch;main.removeCallbacksAndMessages(null);hdr.close();covers.close();dust?.close();velocity?.recycle()
         renderer.close { SpatialNative.dailySpatialRelease(state) }
     }
 }
@@ -879,16 +875,18 @@ private fun DrawScope.drawCardLabels(frame: FloatArray,items: List<SpatialItem>,
             val ink=if(dark||(!rhine&&frame[o+15]>.5f)) Color.White else Color.Black
             // Shape in the native face-space panel, then apply one uniform projection scale.
             // Never reflow against the animated projected height of a lifted Rhine sleeve.
-            val layoutW=if(rhine) frame[RH+15]*density else w
-            val layoutH=if(rhine) frame[RH+16]*density else h
-            val bucketScale=if(rhine) 1f else (kotlin.math.round(frame[o+14]*32)/32).coerceAtLeast(.1f)
+            // Cache native card-space typography, never the camera-dependent projected size.
+            val metrics=DailySpatialProtocol.MAP_CAPTIONS+n*16
+            val layoutW=(if(rhine) frame[RH+15] else frame[metrics])*density
+            val layoutH=(if(rhine) frame[RH+16] else frame[metrics+1])*density
+            val bucketScale=if(rhine) 1f else frame[metrics+2].coerceAtLeast(.1f)
             val textWidth=(layoutW/(4*density)).toInt().coerceAtLeast(1)*(4*density).toInt().coerceAtLeast(1)
             val textHeight=(layoutH/(4*density)).toInt().coerceAtLeast(1)*(4*density).toInt().coerceAtLeast(1)
             val cell=frame[o+7].toInt()
             var caption=cache.entries.get(cell)
             if(caption==null || caption.item!=item || caption.width!=textWidth || caption.height!=textHeight || caption.scale!=bucketScale) {
-                val moving=frame[24]>.5f
-                if((!moving || owner) && (owner || (built<4 && (built==0 || System.nanoTime()-started<2_000_000L)))) {
+                // Populate newly visible captions during gestures too, within the same frame budget.
+                if(owner || (built<4 && (built==0 || System.nanoTime()-started<2_000_000L))) {
             val titleSize=15.5f*bucketScale
             val artistSize=12.5f*bucketScale
             val gap=4*density*bucketScale
@@ -904,15 +902,15 @@ private fun DrawScope.drawCardLabels(frame: FloatArray,items: List<SpatialItem>,
             val artist=measurer.measure(item.singer,TextStyle(fontSize=(artistSize*fit).sp),maxLines=artistLines,overflow=TextOverflow.Ellipsis,constraints=Constraints(maxWidth=textWidth))
                     caption=CaptionLayout(item,textWidth,textHeight,bucketScale,title,artist,title.size.height+gap*fit)
                     cache.entries.put(cell,caption);built++
-                } else if(!moving) pending=true
+                } else pending=true
             }
             val shaped=caption ?: continue
             val x=frame[o+10]*density;val y=frame[o+11]*density
-            val scale=if(owner) frame[o+14]/bucketScale else 1f
+            val scale=(frame[o+14]/bucketScale).coerceAtLeast(.001f)
             withTransform({
                 translate(x,y);scale(scale,scale,Offset.Zero)
             }) {
-                clipRect(0f,0f,textWidth.toFloat(),textHeight.toFloat()) {
+                clipRect(0f,0f,minOf(shaped.width.toFloat(),w/scale),minOf(shaped.height.toFloat(),h/scale)) {
                     drawText(shaped.title,color=ink.copy(alpha=alpha));drawText(shaped.artist,color=ink.copy(alpha=alpha*.78f),topLeft=Offset(0f,shaped.artistTop))
                 }
             }

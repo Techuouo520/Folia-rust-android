@@ -162,6 +162,7 @@ struct Poster {
     portrait: Option<Handle>,
     custom: Option<(String, Handle)>,
     pending_offset: Option<f32>,
+    mobile_insets: [f32; 4],
     retry_cover: Option<Instant>,
     presented: Option<(u64, usize, u64, u32, u32, u32, bool)>,
     events: Vec<(Event, Point)>,
@@ -212,6 +213,7 @@ impl Poster {
             portrait: None,
             custom: None,
             pending_offset: None,
+            mobile_insets: [0.; 4],
             retry_cover: None,
             presented: None,
             events: Vec::new(),
@@ -246,7 +248,7 @@ impl Poster {
             }
         }
         let theme = if dark { Theme::MIDNIGHT } else { Theme { background: Rgb::hex(0xf9f7f3), ..Theme::DAYLIGHT } };
-        let appearance = folia_visualizer::MonetAppearance { shell_capsule: true, native_ticker: true, ..Default::default() };
+        let appearance = folia_visualizer::MonetAppearance { shell_capsule: true, native_ticker: true, mobile_insets: self.mobile_insets, ..Default::default() };
         let spectrum = self.tuning.flag(monet::manifest(), "showAudioVisualization");
         let physical = viewport.physical_size();
         let key = (
@@ -370,6 +372,9 @@ impl Poster {
 
 #[uniffi::export]
 impl FoliaBridge {
+    pub fn monet_landscape_layout(&self, width: f32, height: f32, left: f32, top: f32, right: f32, bottom: f32) -> Vec<f32> {
+        folia_visualizer::mobile_layout::landscape(width, height, [left,top,right,bottom], 1.).packed()
+    }
     pub fn monet_ticker_lines(&self) -> Vec<MonetTickerLine> {
         POSTER.with_borrow(|p| p.as_ref().and_then(|p| p.ticker_lyrics.as_ref())
             .map_or_else(Vec::new, |song| song.lines.iter().map(ticker_line).collect()))
@@ -467,9 +472,12 @@ pub extern "system" fn Java_io_github_techuouo520_folia_MonetView_drawFrame(
     height: i32,
     density: f32,
     dark: u8,
+    left: f32, top: f32, right: f32, bottom: f32,
 ) -> i32 {
     POSTER.with_borrow_mut(|p| {
         p.as_mut().map_or(3, |p| {
+            let insets = [left, top, right, bottom];
+            if p.mobile_insets != insets { p.mobile_insets = insets; p.presented = None; }
             p.tick(width, height, density, dark != 0).unwrap_or_else(|error| {
                 tracing::error!(%error, "Monet frame");
                 3

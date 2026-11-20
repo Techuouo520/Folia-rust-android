@@ -147,27 +147,3 @@ private fun repeatLabel(bridge: FoliaBridge, mode: RepeatMode): String {
         else -> bridge.t("player.loopOff")
     }
 }
-
-@Composable
-fun StoragePermissionScreen(legacy: Boolean, onAllow: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier.safeDrawingPadding().padding(top=50.dp).padding(24.dp).fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-        ) {
-            Text(stringResourceSafe(R.string.permission_storage_title), style = MaterialTheme.typography.headlineSmall)
-            Text(stringResourceSafe(if (legacy) R.string.permission_storage_legacy_body else R.string.permission_storage_body))
-            ButtonAllow(legacy, onAllow)
-        }
-    }
-}
-
-@Composable
-private fun ButtonAllow(legacy: Boolean, onAllow: () -> Unit) {
-    androidx.compose.material3.Button(onClick = onAllow) {
-        Text(stringResourceSafe(if (legacy) R.string.permission_storage_legacy_action else R.string.permission_storage_action))
-    }
-}
-
-@Composable
-private fun stringResourceSafe(id: Int): String = androidx.compose.ui.res.stringResource(id)

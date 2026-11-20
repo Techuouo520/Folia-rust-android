@@ -4,8 +4,7 @@ import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
 /** Ready buffers are borrowed by GL; only recent/free storage can be reclaimed by IO. */
-internal class DailySpatialPixels(size: Int,budget: Int) {
-    private val bytes=size*size*4
+internal class DailySpatialPixels(private val bytes: Int,budget: Int) {
     private val capacity=budget/bytes
     private val ready=mutableMapOf<String,ByteBuffer>()
     private val recent=linkedMapOf<String,ByteBuffer>()

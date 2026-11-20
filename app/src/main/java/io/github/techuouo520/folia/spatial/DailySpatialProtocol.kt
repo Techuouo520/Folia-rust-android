@@ -2,7 +2,7 @@ package io.github.techuouo520.folia.spatial
 
 
 internal object DailySpatialProtocol {
-    const val VERSION:Int = 6
+    const val VERSION:Int = 7
     const val HEADER:Int = 32
     const val STRIDE:Int = 16
     const val VISIBLE:Int = 384
@@ -11,6 +11,7 @@ internal object DailySpatialProtocol {
     const val ACTION:Int = HEADER + STRIDE * SLOTS + PREFETCH
     const val RHINE:Int = ACTION + 192
     const val RHINE_POSES:Int = RHINE + 64
+    const val MAP_CAPTIONS:Int = RHINE_POSES // Map-only native text metrics, stride 16.
     const val FLOATS:Int = RHINE_POSES + SLOTS * 16
     const val RHINE_TOPOLOGY:Int = 7 // Relative to RHINE; changes only when slot identities change.
     // GL-owned render hints, never scene/animation inputs. Full padded viewport in dp.

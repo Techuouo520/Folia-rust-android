@@ -73,19 +73,20 @@ vec4 finishColor(vec3 rgb,float alpha){
  }return vec4(rgb,alpha);
 }
 flat in float v_lyrics;
+vec2 coverDx,coverDy;
 vec3 coverSample(vec2 uv){
- // Both artwork textures have one mip level and GL_LINEAR filtering. Explicit
- // level zero keeps identical sampling even in the face-only conditional below.
+ // HD uses the projected footprint; the independent preview atlas stays at
+ // level zero so adjacent album tiles never bleed into one another.
  float blend=0.;
  if(v_art.y>.5){
   int layer=clamp(int(v_art.x),0,96);
   blend=smoothstep(0.,1.,u_cover_blend[layer/4][layer%4]);
-  if(blend>=1.)return textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
+  if(blend>=1.)return textureGrad(u_covers,vec3(uv,v_art.x),coverDx,coverDy).rgb;
  }
  vec3 preview=mix(vec3(.90),vec3(.12),u_dark);
  if(v_info.x>.5)preview=textureLod(u_previews,(v_art.zw+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
  if(blend<=0.)return preview;
- vec3 high=textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
+ vec3 high=textureGrad(u_covers,vec3(uv,v_art.x),coverDx,coverDy).rgb;
  return mix(preview,high,blend);
 }
 // COVER_LYRICS_CHIP
@@ -114,7 +115,8 @@ vec3 backdrop(vec2 uv){
  vec2 baseUv=u_scene_rect.xy+((pixelUv-.5)/max(u_background_scale,.9)+.5)*u_scene_rect.zw;
  sampleUv=boundedRefraction(sampleUv,baseUv);
  if(u_blur>.9999)return mix(texture(u_context,sampleUv).rgb,backdropTint(sampleUv),mix(.12,.26,u_dark));
- float y=(1.-uv.y)*u_screen.y;float edge=max(1.-smoothstep(0.,u_policy.x,y),smoothstep(u_policy.y,u_screen.y,y));
+ float y=(1.-uv.y)*u_screen.y;float edge=0.;
+ if(u_policy.w>0.)edge=max(1.-smoothstep(0.,u_policy.x,y),smoothstep(u_policy.y,u_screen.y,y));
  vec3 rgb=texture(u_scene,sampleUv).rgb;
  if(edge>.0001){float depth=max(0.,(texture(u_depth,sampleUv).r-.5)*8000.);float amount=edge*mix(.35,1.,clamp(depth/max(u_policy.z,1.),0.,1.));rgb=mix(rgb,texture(u_soft,sampleUv).rgb,min(1.,amount*2.));rgb=mix(rgb,texture(u_far,sampleUv).rgb,max(0.,amount*2.-1.));rgb=mix(rgb,backdropTint(sampleUv),edge*edge*u_policy.w);}
  if(u_blur>.0001)rgb=mix(rgb,mix(texture(u_context,sampleUv).rgb,backdropTint(sampleUv),mix(.12,.26,u_dark)),u_blur);
@@ -127,7 +129,8 @@ vec3 frostedBackdrop(vec2 uv){
  vec2 at=u_scene_rect.xy+((uv-.5)/max(u_background_scale,.9)+.5)*u_scene_rect.zw;
  vec2 base=u_scene_rect.xy+((pixelUv-.5)/max(u_background_scale,.9)+.5)*u_scene_rect.zw;
  at=boundedRefraction(at,base);vec3 rgb=texture(u_frost_scene,at).rgb;
- float y=(1.-uv.y)*u_screen.y;float edge=max(1.-smoothstep(0.,u_policy.x,y),smoothstep(u_policy.y,u_screen.y,y));
+ float y=(1.-uv.y)*u_screen.y;float edge=0.;
+ if(u_policy.w>0.)edge=max(1.-smoothstep(0.,u_policy.x,y),smoothstep(u_policy.y,u_screen.y,y));
  rgb=mix(rgb,backdropTint(at),edge*edge*u_policy.w);
  if(u_blur>.0001)rgb=mix(rgb,mix(texture(u_context,at).rgb,backdropTint(at),mix(.12,.26,u_dark)),u_blur);
  return rgb;
@@ -309,6 +312,11 @@ vec3 archiveSurface(vec3 normal,vec3 localNormal){
  return archiveSurface(normal,localNormal,art);
 }
 void main(){
+#ifndef RHINE_DEPTH_PASS
+ // Compute before divergent face/material branches, including the opaque pass.
+ vec2 artUv=vec2(v_local.x,-v_local.y);
+ coverDx=dFdx(artUv);coverDy=dFdy(artUv);
+#endif
 #ifdef RHINE_DEPTH_PASS
  // Colour is masked off. Linking strips all optical varyings and calculations;
  // gl_Position uses the very same vertex transform as the subsequent colour pass.

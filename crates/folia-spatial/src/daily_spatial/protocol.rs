@@ -16,8 +16,11 @@ pub const RHINE_HOLOGRAM:usize=25;
 pub const HOLOGRAM_STRIDE:usize=12;
 pub const HOLOGRAM_SLOTS:usize=3;
 pub const RHINE_POSES:usize=RHINE+64;
+// In map mode the unused pose slots carry native caption width, height and font scale.
+// The 16-float slot stride keeps the buffer size unchanged; Rhine still owns its matrices.
+pub const MAP_CAPTIONS:usize=RHINE_POSES;
 pub const FLOATS: usize = RHINE_POSES+SLOTS*16;
-pub const VERSION:u32=6;
+pub const VERSION:u32=7;
 
 /// Reserve bit 1 of the packed artwork-ready field for the expanded playing sleeve.
 pub(crate) fn lyrics_chip_flag(frame: &[f32], cell: f32) -> f32 {

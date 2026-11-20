@@ -20,7 +20,10 @@ import io.github.techuouo520.folia.bridge.FoliaBridge
 import io.github.techuouo520.folia.bridge.PlaybackSnapshot
 
 @Composable
-internal fun PlayerLyricsPage(bridge: FoliaBridge, playback: PlaybackSnapshot, open: Boolean, preload: Boolean) {
+internal fun PlayerLyricsPage(
+    bridge: FoliaBridge, playback: PlaybackSnapshot, open: Boolean, preload: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val owner = playback.artSource()?.owner
     val navigation = LocalCornerNavigation.current
     val wallLyricsOpen = !open && navigation?.insideAlbum == true
@@ -67,7 +70,7 @@ internal fun PlayerLyricsPage(bridge: FoliaBridge, playback: PlaybackSnapshot, o
     // Keep only the current song's prepared page. Hidden pages neither receive touches
     // nor run their rendering loop once preparation finishes.
     Box(Modifier.fillMaxSize().zIndex(if (open) 1f else -1f)
-        .then(if (open) Modifier else Modifier.clearAndSetSemantics {})) {
+        .then(modifier).then(if (open) Modifier else Modifier.clearAndSetSemantics {})) {
         BackHandler(open && navigation?.modalOpen != true) { navigation?.back() }
         MonetLyrics(bridge, playback, LocalFoliaDark.current, selected = true,
             active = foreground && (open || !prepared), controlsVisible = open,

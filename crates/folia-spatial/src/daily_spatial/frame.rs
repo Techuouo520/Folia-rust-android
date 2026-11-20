@@ -25,11 +25,18 @@ impl State {
   if self.action_phase==2&&self.menu.value<0.08&&self.confirmation.value<1.{moving=true;}
   moving|=self.action_phase==1&&self.menu.value!=self.menu.target;
   out[25]=if shape_changed{1.0}else{0.0};
-  self.quiet=(self.quiet-dt).max(0.0);let camera_moving=self.x.velocity.abs()+self.y.velocity.abs()>0.5||(self.zoom.value-self.zoom.target).abs()>0.002;let typography_moving=layout||self.lift.velocity.abs()>0.005||camera_moving||(self.mode.value-self.mode.target).abs()>0.005||self.quiet>0.0;self.labels.target=if self.action_cell.is_some()&&!self.lift_dismissed{1.0}else if typography_moving{0.0}else{1.0};out[24]=if typography_moving{1.0}else{0.0};moving|=self.quiet>0.0;moving|=self.labels.step(dt);
+  self.quiet=(self.quiet-dt).max(0.0);
+  let camera_moving=self.x.velocity.abs()+self.y.velocity.abs()>0.5||(self.zoom.value-self.zoom.target).abs()>0.002;
+  let typography_reflow=layout||self.lift.velocity.abs()>0.005||(self.mode.value-self.mode.target).abs()>0.005;
+  let typography_moving=typography_reflow||camera_moving||self.quiet>0.0;
+  // Camera gestures and their settling motion keep captions visible. Only card/layout
+  // transitions retain the existing fade; the motion flag still drives frame consumers.
+  self.labels.target=if self.action_cell.is_some()&&!self.lift_dismissed{1.0}else if typography_reflow{0.0}else{1.0};
+  out[24]=if typography_moving{1.0}else{0.0};moving|=self.quiet>0.0;moving|=self.labels.step(dt);
   let (cx,cy,rx,ry)=self.camera();let (px,py)=if let Some((x,y))=selected_center{self.project(x,y)}else{(cx,cy)};
   out[0]=if moving&&!self.capture_hold{1.0}else{0.0};out[1]=self.mode.value.clamp(0.,1.);out[2]=self.x.value;out[3]=self.y.value;out[4]=self.zoom.value;out[5]=rx;out[6]=ry;out[7]=cx;out[8]=cy;out[9]=w;out[10]=h;out[11]=self.song(self.selected) as f32;out[12]=px;out[13]=py;out[14]=0.;out[15]=self.labels.value.clamp(0.,1.);out[18]=1.0-out[1];out[19]=-20.0*out[1];out[20]=self.header;out[21]=self.scroll;
-  out[26]=(h*0.18).clamp(56.,120.);out[27]=h-(h*0.23).clamp(72.,152.);
-  out[28]=(ry*(1.-(h*0.5/ry).cos())).max(24.);out[29]=14.;out[30]=1.0;
+  let [top,bottom,strength]=crate::render_policy::screen_edges(w,h);out[26]=top;out[27]=bottom;
+  out[28]=(ry*(1.-(h*0.5/ry).cos())).max(24.);out[29]=14.;out[30]=strength;
   // Match the View visibility threshold exactly. Hidden captions do not need projected
   // corners, depth factors or typography geometry during expansion. Include the flag in
   // the cache key so they are rebuilt before the first returning fade-in frame.
@@ -103,6 +110,7 @@ impl State {
   out[16]=self.visible.len() as f32;
   for(slot,&(index,r))in self.visible.iter().enumerate(){out[31]=out[31].max(r.w.max(r.h)*self.zoom.value);let o=HEADER+slot*STRIDE;out[o]=self.visible_songs[slot] as f32;out[o+7]=index as f32;out[o+8]=self.visible_scales[slot];out[o+9]=if self.hidden_cell==Some(index){0.}else if self.fill_cell==Some(index){self.fill.value.clamp(0.,1.)}else{1.};out[o+1]=r.x;out[o+2]=r.y;out[o+3]=r.w;out[o+4]=r.h;out[o+5]=*self.weights.get(&index).unwrap_or(&0.0);
    let(tx,ty,tw,th,over_art,font_scale)=caption_region(r);out[o+15]=if over_art{1.}else{0.};
+   let m=MAP_CAPTIONS+slot*16;out[m]=tw;out[m+1]=th;out[m+2]=font_scale;
    if !captions_visible{continue}
    if tw>=48.&&th>=30.{let(a,b)=self.project(tx,ty);let(c,d)=self.project(tx+tw,ty+th);out[o+10]=a;out[o+11]=b;out[o+12]=(c-a).max(0.);out[o+13]=(d-b).max(0.);
     // One uniform scale for glyphs. No separate X/Y font transforms.

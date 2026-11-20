@@ -107,5 +107,46 @@ fun main() {
         closeTo(window.rect().height,100f) // Account closes back to pill, not the home circle.
         rest(false,false);closeTo(window.rect().height,50f)
     }
-    println("PASS: actual 50 dp origin, full outline docking, press recovery, rapid reversals, blur carry, live resize, pill/account coexistence and frame-loop rest at 60/90/120 Hz")
+    // The same gear morphs from the 50dp corner dock into a 40dp cover button.
+    // Its right/top edge stays attached, and a menu reversal returns to that dock.
+    for(size in listOf(50f,47f,43f,40f)) {
+        val gear=CornerMotion()
+        gear.dockBounds(CornerRect(50f-size,0f,50f,size))
+        gear.bounds(360f,260f,true)
+        repeat(240) { gear.step(false,1f/120) }
+        closeTo(gear.rect().width,size); closeTo(gear.rect().height,size)
+        closeTo(gear.rect().right,360f); closeTo(gear.rect().top,0f)
+        repeat(90) { gear.step(true,1f/120) }
+        gear.target(false)
+        repeat(360) { gear.step(false,1f/120) }
+        closeTo(gear.rect().width,size); closeTo(gear.rect().height,size)
+        closeTo(gear.rect().right,360f)
+    }
+    // Exercise the real JNI batch ingress, including zero-time reversals and the
+    // body/outline height contract used during rapid window rotations.
+    for(hz in listOf(60,90,120)) {
+        val portrait=doubleArrayOf(10.0,800.0,380.0,0.0)
+        val landscape=doubleArrayOf(580.0,360.0,240.0,1.0)
+        val pose=doubleArrayOf(10.0,0.0,800.0,0.0,380.0,0.0,0.0,0.0)
+        val outline=CornerMotion(bottomOrigin=true,initiallyOpen=true)
+        repeat(hz*3) { index ->
+            val target=if(index%9<4) landscape else portrait
+            val before=pose.copyOf()
+            MotionKernel.playerReflow(pose,target,0.0)
+            for(i in pose.indices) check(kotlin.math.abs(before[i]-pose[i])<1e-9)
+            MotionKernel.playerReflow(pose,target,1.0/hz)
+            check(pose.all { it.isFinite() })
+            val f=pose[6].toFloat().coerceIn(0f,1f)
+            val w=pose[4].toFloat()
+            val art=48f+(w-48f)*f
+            val height=120f+(art+96f-120f)*f
+            outline.bounds(w,height,true,liveHeight=true)
+            outline.step(true,1f/hz)
+            closeTo(outline.layoutHeight,height)
+        }
+        repeat(hz*4) { MotionKernel.playerReflow(pose,portrait,1.0/hz) }
+        check(pose.contentEquals(doubleArrayOf(10.0,0.0,800.0,0.0,380.0,0.0,0.0,0.0)))
+        check(!MotionKernel.playerReflow(pose,portrait,1.0/hz))
+    }
+    println("PASS: actual 50 dp origin, full outline docking, press recovery, rapid reversals, blur carry, live resize, pill/account coexistence frame-loop rest and interrupted orientation reflow at 60/90/120 Hz")
 }

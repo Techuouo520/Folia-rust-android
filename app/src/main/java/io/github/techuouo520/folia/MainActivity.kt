@@ -89,13 +89,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun ComponentActivity.configureSystemBars(dark: Boolean) {
-    // SystemBarStyle.auto retains the platform's three-button navigation contrast protection.
-    // Do not hide navigation bars: only the scene draws underneath them.
+private fun ComponentActivity.configureSystemBars(dark: Boolean,
+    landscape: Boolean = resources.configuration.screenWidthDp > resources.configuration.screenHeightDp) {
     enableEdgeToEdge(
         statusBarStyle=SystemBarStyle.auto(android.graphics.Color.TRANSPARENT,android.graphics.Color.TRANSPARENT) {dark},
         navigationBarStyle=SystemBarStyle.auto(0xE6FFFFFF.toInt(),0xCC101014.toInt()) {dark},
     )
+    val bars = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+    bars.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    if (landscape) bars.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+    else bars.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
 }
 
 @Composable
@@ -103,8 +106,10 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
     val context = LocalContext.current
     FoliaApp.from(context).appearanceVersion
     val dark=FoliaApp.from(context).displaySettings.dark(androidx.compose.foundation.isSystemInDarkTheme())
-    DisposableEffect(dark) {
-        (context as? ComponentActivity)?.configureSystemBars(dark)
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val landscape = configuration.screenWidthDp > configuration.screenHeightDp
+    DisposableEffect(dark, landscape, resumeEpoch) {
+        (context as? ComponentActivity)?.configureSystemBars(dark, landscape)
         onDispose { }
     }
     var storageGranted by remember { mutableStateOf(storageGranted(context)) }
@@ -202,6 +207,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
     }
     FoliaTheme(bridge,dark,shell.playback) {
     val playerFrost=rememberFrostBackdrop()
+    val bubbleLyrics = rememberBubbleLyrics()
     val playerProgress=remember(route) { androidx.compose.runtime.mutableFloatStateOf(0f) }
     val playerFootprint = if (fullscreenMusicBarEnabled) 88.dp else MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp
     val clearance = remember { PlayerClearance() }
@@ -218,14 +224,17 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
     } else Modifier
     androidx.compose.runtime.CompositionLocalProvider(LocalGripGate provides gripGate, LocalPlayerClearance provides clearance,
         LocalSponsorCredit provides sponsor) {
+    LyricsViewportHost(bridge) {
     AppCornerWindows(bridge,modifier=dockTouch,playerInFront=fullscreenMusicBarEnabled && route=="home" && playerInFront,player={
         if (route == "home") {
             if (fullscreenMusicBarEnabled) MusicBar(bridge,shell.playback,playerFrost,playerExpanded,{playerExpanded=it},
                 toggle,action,playerProgress,screenCorner)
             else MusicBarBubble(bridge,shell.playback,playerFrost,playerExpanded,{playerExpanded=it},toggle,action,
-                dockLeft=dockLeft.value)
+                dockLeft=dockLeft.value, lyrics=bubbleLyrics)
         }
     }) {
+    BubbleLyricsHost(bubbleLyrics, bridge, shell.playback, playerFrost,
+        preload = !fullscreenMusicBarEnabled && route == "home" && playerExpanded && !shell.playback.currentLyric.isNullOrBlank()) {
     when (route) {
         "search" -> SearchPage(bridge = bridge, onBack = { route = "home" }, onPlay = { tracks, index ->
             if (!AudioFocus.acquire(context, bridge)) {
@@ -246,7 +255,6 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
                 }
             },
             onOpenPlayer = { playerExpanded=true },
-            preloadPlayerLyrics = !fullscreenMusicBarEnabled && playerExpanded && !shell.playback.currentLyric.isNullOrBlank(),
             playerProgress=playerProgress,playerFootprint=playerFootprint,frost=playerFrost,screenCorner=screenCorner,
             onOpenSearch = { route = "search" },
             onPlay = { tracks, index ->
@@ -260,10 +268,12 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
             action = action,
         )
     }
+    }
 }
 }
 }
 
+}
 }
 
 // The original immersive player and its transition remain available behind this switch.

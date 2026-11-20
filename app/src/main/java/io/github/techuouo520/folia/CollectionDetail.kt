@@ -64,10 +64,6 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
         }
     } }
     var albumVisible by remember(key) { mutableStateOf(false) }
-    val entry = LocalCollectionEntry.current
-    SideEffect {
-        if (visible.isEmpty() && !page.loading) entry?.sceneReady = true
-    }
     val playback=shell.playback
     val playingKey=remember(visible,catalogue,playback.provider,playback.onlineId,playback.trackId) {
         visible.firstOrNull { cell ->
@@ -88,7 +84,6 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
             items=visible,dark=dark,playingKey=playingKey,playing=playback.state==TransportState.PLAYING,
             source=source,initialStyle=style,chrome=false,expansionComplete=expanded,interactive=interactive,sceneActive=active,bottomInset=bottomInset,
             onFramePresented={titleBackdrop.sourceFramePresented();onFramePresented()},
-            onSceneReady={ entry?.sceneReady = true },
             onPlay={ cell -> indices.value[cell.key]?.let {onPlay(tracks.value,it)} },onToggle=onToggle,
             onNext={ cell -> indices.value[cell.key]?.let {index -> action {bridge.enqueueNext(listOf(tracks.value[index]))} } },
             isFavorite={ cell -> identity(page.tracks[catalogue.getValue(cell)]) in favorites },

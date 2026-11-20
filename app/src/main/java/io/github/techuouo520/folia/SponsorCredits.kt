@@ -120,6 +120,12 @@ internal fun rememberSponsorCredit(playback: PlaybackSnapshot): SponsorPresentat
 @Composable
 internal fun BoxScope.SponsorFooter(bridge: FoliaBridge) {
     val presentation = LocalSponsorCredit.current ?: return
+    val viewport = LocalLyricsViewport.current
+    val footerBottom = rustTravel(if (viewport.landscape) 12f else
+        (MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp + 12.dp).value, 14.0,
+        (MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp + 12.dp).value)
+    val footerWidth = if (viewport.landscape)
+        (viewport.cardX-10f-viewport.left-MusicBarDockSide.value-64f).coerceIn(1f,360f).dp else 360.dp
     val sponsor = presentation.credit
     val ink = MaterialTheme.colorScheme.onSurfaceVariant
     val locale = Locale.getDefault()
@@ -135,13 +141,13 @@ internal fun BoxScope.SponsorFooter(bridge: FoliaBridge) {
         else bridge.t("sponsorship.contribution").replace("{{amount}}", amount)
     Box(Modifier.align(AbsoluteAlignment.BottomLeft).windowInsetsPadding(WindowInsets.safeDrawing)
         .absolutePadding(left = MusicBarDockSide + 48.dp + 16.dp, right = MusicBarDockSide,
-            bottom = MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp + 12.dp)) {
+            bottom = footerBottom.floatValue.dp)) {
         key(presentation.track) {
             AnimatedVisibility(visible = presentation.visible && SystemClock.elapsedRealtime() < presentation.hideAt,
                 enter = fadeIn(tween(160)),
                 exit = fadeOut(tween(300, easing = FastOutSlowInEasing)) +
                     slideOutVertically(tween(300, easing = FastOutSlowInEasing)) { it / 4 }) {
-                Column(Modifier.widthIn(max = 360.dp).avoidPlayer().semantics(mergeDescendants = true) {},
+                Column(Modifier.widthIn(max = footerWidth).avoidPlayer().semantics(mergeDescendants = true) {},
                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(bridge.t("sponsorship.thanks").replace("{{name}}", sponsor.name),

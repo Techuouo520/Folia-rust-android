@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="permission_storage_title">Allow access to music</string>
+    <string name="permission_storage_category">Local music · File access</string>
+    <string name="permission_storage_return">After allowing access, return to Folia to continue.</string>
     <string name="permission_storage_body">Folia reads the music folder you choose, including lyric files next to the songs. Allow access to all files in system settings.</string>
     <string name="permission_storage_action">Open settings</string>
     <string name="permission_storage_legacy_body">Folia reads the music folder you choose, including lyric files next to the songs. Allow storage access.</string>

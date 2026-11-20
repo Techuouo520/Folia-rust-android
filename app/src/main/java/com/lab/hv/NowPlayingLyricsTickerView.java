@@ -280,6 +280,9 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    private long lyricsDelayMs;
    private boolean lyricsStyleRebuildPosted;
    private boolean lyricsStyleRebuildPending;
+   private boolean monetManagedSizing;
+   private boolean monetLandscape;
+   private boolean monetMetricsPending;
    private final Runnable lyricsStyleRebuild = () -> {
       this.lyricsStyleRebuildPosted = false;
       this.rebuildForTextStyle();
@@ -288,6 +291,8 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    @Override
    protected void onConfigurationChanged(android.content.res.Configuration newConfig) {
       super.onConfigurationChanged(newConfig);
+      // The Rust viewport supplies both the width and type metrics in one layout pass.
+      if (this.monetManagedSizing) return;
       boolean phoneLandscape = isPhoneLandscape(this.getContext()) || this.compactSizing;
       if (phoneLandscape == this.sizedForPhoneLandscape) return;
       this.sizedForPhoneLandscape = phoneLandscape;
@@ -844,16 +849,23 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    /** Use the font sizes of the poster layout, in physical pixels, including its size setting. */
-   public void setMonetTextSize(float mainPx, float subtitlePx) {
-      if (mainPx <= 0 || subtitlePx <= 0 ||
-            (Math.abs(mainPx - charTextPx) < .01f && Math.abs(subtitlePx - translationCharTextPx) < .01f)) return;
+   public void setMonetTextSize(float mainPx, float subtitlePx, boolean landscape) {
+      if (mainPx <= 0 || subtitlePx <= 0) return;
+      monetManagedSizing = true;
+      if (Math.abs(mainPx-charTextPx)<.01f && Math.abs(subtitlePx-translationCharTextPx)<.01f
+            && monetLandscape == landscape) return;
+      monetLandscape = landscape;
       charTextPx = mainPx;
       translationCharTextPx = subtitlePx;
       rowHeightPx = Math.max(1, Math.round(mainPx * 1.3f));
       translationRowHeightPx = Math.max(1, Math.round(subtitlePx * 1.25f));
+      sentenceGapPx = Math.round(landscape ? mainPx*.42f : dpF(42f));
       blurViewportExtraPx = Math.max(rowHeightPx, translationRowHeightPx) * 2f;
       wrapMeasurePaint.setTextSize(mainPx);
-      if (!timedLines.isEmpty()) rebuildForTextStyle();
+      // Do not rebuild at the old portrait width and then immediately rebuild at the
+      // new width. Keep parsed/timed lines and resolve the final metrics in onLayout.
+      monetMetricsPending = true;
+      requestLayout();
    }
 
    public void setLyricsText(@Nullable String text) {
@@ -1000,6 +1012,18 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
          ++this.lyricsParseToken;
          this.lyricsParseInFlight = false;
          this.lyricsSourceText = "";
+      }
+      if (this.rowBuildActive) {
+         ++this.rowBuildGeneration;
+         this.rowBuildActive = false;
+         this.rowBuildOnPrepared = null;
+         this.wrappedMainRows = null;
+         this.wrappedTranslationRows = null;
+         android.view.Choreographer.getInstance().removeFrameCallback(this.rowBuildFrame);
+         this.recycleRowHoldersToPool();
+         this.rowHolders.clear();
+         this.sourceGroups.clear();
+         this.prepSourceGroups.clear();
       }
    }
 
@@ -1231,7 +1255,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
                   timedTokens.addAll(lineTokens);
                   emittedOrder += lineTokens.size();
                } else if (!containsTimedTag) {
-                  String plainText = this.normalizeLyricLineText(this.collapseSpaces(rawLine));
+                  String plainText = this.normalizeLyricLineText(LyricRowWrapper.collapseSpaces(rawLine));
                   String performerMarker = this.extractPerformerMarkerLabel(plainText);
                   if (performerMarker != null) {
                      // Some providers omit a timestamp on a performer-only row. In timed
@@ -1409,7 +1433,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       if (stamps.isEmpty()) {
          return out;
       } else {
-         String plainAfterTags = this.normalizeLyricLineText(this.collapseSpaces(LRC_TIME_PATTERN.matcher(rawLine).replaceAll("")));
+         String plainAfterTags = this.normalizeLyricLineText(LyricRowWrapper.collapseSpaces(LRC_TIME_PATTERN.matcher(rawLine).replaceAll("")));
          ArrayList<String> segments = new ArrayList<>(stamps.size());
          int nonEmptySegmentCount = 0;
          int singleSegmentIndex = -1;
@@ -2091,7 +2115,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
          return null;
       }
 
-      String display = this.collapseSpaces(head).trim();
+      String display = LyricRowWrapper.collapseSpaces(head).trim();
       if ("合".equals(display)) return "合唱";
       return TextUtils.isEmpty(display) ? null : display;
    }
@@ -2822,6 +2846,11 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       int bottom = this.getHeight() - this.getPaddingBottom();
       int width = Math.max(0, right - left);
       int height = Math.max(0, bottom - top);
+      if (width > 0 && this.monetMetricsPending) {
+         this.monetMetricsPending = false;
+         this.lastWrapWidthPx = width;
+         this.rebuildForTextStyle();
+      }
       if (width <= 0 || width == this.lastWrapWidthPx || this.timedLines.isEmpty() && this.plainLines.isEmpty()) {
          if (width > 0 && width != this.lastRowsMeasureWidthPx) {
             int rowWidthSpec = this.makeRowWidthMeasureSpec(width);
@@ -4116,7 +4145,10 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    private void rebuildRows() { this.rebuildRowsNow(); }
 
    private boolean rowBuildActive;
-   private long rowBuildGeneration;
+   private volatile long rowBuildGeneration;
+   private final ExecutorService rowWrapExecutor = createLyricsParseExecutor();
+   private List<List<String>> wrappedMainRows;
+   private List<List<String>> wrappedTranslationRows;
    private int rowBuildCursor;
    @Nullable private Runnable rowBuildOnPrepared;
    private FrameLayout rowBuildContainer;
@@ -4150,16 +4182,43 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       this.lastRowsMeasureWidthPx = -1;
 
       this.rowBuildCursor=0;
-      this.rowBuildContainer=this.isShown()?this.trackContainer:new FrameLayout(this.getContext());
+      this.rowBuildContainer=new FrameLayout(this.getContext());
       this.rowBuildFallback=!this.plainLines.isEmpty()?this.plainLines:Collections.singletonList(AppStrings.get(string.ui_lyrics_empty));
       this.rowBuildActive=true;
-      if (!this.isShown()) {
-         if(this.isAttachedToWindow())android.view.Choreographer.getInstance().postFrameCallback(this.rowBuildFrame);
-         return;
+      this.wrappedMainRows=null;
+      this.wrappedTranslationRows=null;
+      final long generation=this.rowBuildGeneration;
+      final long parseToken=this.lyricsParseToken;
+      final float mainSize=this.charTextPx, subtitleSize=this.translationCharTextPx;
+      final LyricRowWrapper wrapper=new LyricRowWrapper(this.wrapMeasurePaint,
+            this.resolveRowAvailableWidthPx()-this.rowRightReservePx, this.dpF(40f));
+      final List<String> main=new ArrayList<>(), subtitles=new ArrayList<>();
+      for(int i=0;i<this.rowBuildCount();i++) {
+         boolean timed=!this.timedLines.isEmpty();
+         TimedLine line=timed?(TimedLine)this.timedLines.get(i):null;
+         main.add(timed?line.text:this.rowBuildFallback.get(i));
+         List<String> translations=timed?this.timedTranslations:this.plainTranslations;
+         subtitles.add((line!=null&&line.prepCountdown)||i>=translations.size()?null:translations.get(i));
       }
-      while(this.rowBuildCursor<this.rowBuildCount())this.appendNextPreloadSource();
-      this.finishRowsRebuild(this.rowBuildOldTranslation);
-      this.rowBuildActive=false;
+      this.rowWrapExecutor.execute(()->{
+         try {
+            List<List<String>> wrapped=new ArrayList<>(main.size()), translated=new ArrayList<>(main.size());
+            for(int i=0;i<main.size();i++) {
+               if(generation!=this.rowBuildGeneration)return;
+               wrapped.add(wrapper.split(main.get(i),8,mainSize));
+               translated.add(wrapper.split(subtitles.get(i),16,subtitleSize));
+            }
+            this.lyricsMainHandler.post(()->{
+               if(generation!=this.rowBuildGeneration||parseToken!=this.lyricsParseToken)return;
+               this.wrappedMainRows=wrapped;this.wrappedTranslationRows=translated;
+               if(this.isAttachedToWindow())android.view.Choreographer.getInstance().postFrameCallback(this.rowBuildFrame);
+            });
+         } catch(RuntimeException error) {
+            this.lyricsMainHandler.post(()->{
+               if(generation==this.rowBuildGeneration)this.failMonetLines(parseToken,error);
+            });
+         }
+      });
    }
    private int rowBuildCount(){return this.timedLines.isEmpty()?this.rowBuildFallback.size():this.timedLines.size();}
    private void appendNextPreloadSource(){
@@ -4167,7 +4226,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       if(this.timedLines.isEmpty())this.appendPlainSource(index,this.rowBuildFallback);else this.appendTimedSource(index);
    }
    private void advanceRowPreload(long frameTimeNs){
-      if(!this.rowBuildActive||!this.isAttachedToWindow())return;
+      if(!this.rowBuildActive||this.wrappedMainRows==null||!this.isAttachedToWindow())return;
       long generation=this.rowBuildGeneration;
       android.view.Display display=this.getDisplay();
       float hz=display==null?60f:display.getRefreshRate();
@@ -4207,7 +4266,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
             TimedLine line = (TimedLine)this.timedLines.get(sourceIndex);
             boolean prepCountdown = line.prepCountdown;
-            List<String> rows = this.splitToFixedRows(line.text, 8, this.charTextPx);
+            List<String> rows = this.wrappedMainRows.get(sourceIndex);
             if (rows.isEmpty()) {
                rows = Collections.singletonList(" ");
             }
@@ -4233,7 +4292,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
             int translationRowCount = 0;
             String translation = prepCountdown ? null : (sourceIndex < this.timedTranslations.size() ? (String)this.timedTranslations.get(sourceIndex) : null);
             if (!TextUtils.isEmpty(translation)) {
-               List<String> trRows = this.splitToFixedRows(translation, 16, this.translationCharTextPx);
+               List<String> trRows = this.wrappedTranslationRows.get(sourceIndex);
                if (trRows.isEmpty()) {
                   trRows = Collections.singletonList(" ");
                }
@@ -4266,7 +4325,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
    private void appendPlainSource(int sourceIndex,List<String> fallbackLines){
 
-            List<String> rows = this.splitToFixedRows((String)fallbackLines.get(sourceIndex), 8, this.charTextPx);
+            List<String> rows = this.wrappedMainRows.get(sourceIndex);
             if (rows.isEmpty()) {
                rows = Collections.singletonList(" ");
             }
@@ -4293,7 +4352,7 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
             int translationRowCount = 0;
             String translation = sourceIndex < this.plainTranslations.size() ? (String)this.plainTranslations.get(sourceIndex) : null;
             if (!TextUtils.isEmpty(translation)) {
-               List<String> trRows = this.splitToFixedRows(translation, 16, this.translationCharTextPx);
+               List<String> trRows = this.wrappedTranslationRows.get(sourceIndex);
                if (trRows.isEmpty()) {
                   trRows = Collections.singletonList(" ");
                }
@@ -4324,10 +4383,13 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       if(this.rowBuildContainer!=this.trackContainer){
          // Attach already prepared rows once; hidden preloading never invalidates the whole
          // window for each new glyph View. No text, translation or karaoke timing is omitted.
-         while(this.rowBuildContainer.getChildCount()>0){
-            View row=this.rowBuildContainer.getChildAt(0);
-            this.rowBuildContainer.removeViewAt(0);this.trackContainer.addView(row);
-         }
+         // Removing child zero repeatedly shifts the remaining array for every row.
+         // Keep order from rowHolders, detach once, and coalesce the parent layout request.
+         this.rowBuildContainer.removeAllViews();
+         this.trackContainer.suppressLayout(true);
+         try {
+            for (RowHolder holder : this.rowHolders) this.trackContainer.addView(holder.row);
+         } finally { this.trackContainer.suppressLayout(false); }
       }
       int translationCount = 0;
 
@@ -6429,21 +6491,6 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
    }
 
    @NonNull
-   private List<String> splitToFixedRows(@Nullable String text, int charsPerRow, float textSizePx) {
-      if (TextUtils.isEmpty(text)) {
-         return Collections.emptyList();
-      } else {
-         int safeRowChars = Math.max(1, charsPerRow);
-         if (this.shouldUseWordAwareWrap(text)) {
-            return this.splitWordAwareRows(text, safeRowChars, textSizePx);
-         } else {
-            float maxWidthPx = this.resolveRowAvailableWidthPx() - this.rowRightReservePx;
-            return maxWidthPx <= this.dpF(40.0F) ? this.splitByCodePointBudget(text, safeRowChars) : this.splitCodePointByWidth(text, maxWidthPx, textSizePx, safeRowChars);
-         }
-      }
-   }
-
-   @NonNull
    private RowSourceMatch resolveRowSourceMatch(@NonNull String sourceText, @NonNull String rowText, int searchStartUtf16, int fallbackStartCodePoint) {
       int rowCodePointCount = rowText.codePointCount(0, rowText.length());
       int sourceCodePointCount = sourceText.codePointCount(0, sourceText.length());
@@ -6529,215 +6576,6 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       return text.offsetByCodePoints(0, safeTarget);
    }
 
-   private boolean shouldUseWordAwareWrap(@Nullable String text) {
-      if (TextUtils.isEmpty(text)) {
-         return false;
-      } else {
-         boolean hasLatin = false;
-         boolean hasSpace = false;
-         int[] cps = text.codePoints().toArray();
-
-         for(int i = 0; i < cps.length; ++i) {
-            int cp = cps[i];
-            if (Character.isWhitespace(cp)) {
-               hasSpace = true;
-            } else if (this.isAsciiLatinWordCodePoint(cp)) {
-               hasLatin = true;
-            }
-
-            if (hasLatin && hasSpace) {
-               return true;
-            }
-         }
-
-         return false;
-      }
-   }
-
-   private boolean isAsciiLatinWordCodePoint(int cp) {
-      if (cp > 127) {
-         return false;
-      } else {
-         return Character.isLetterOrDigit(cp) || cp == 39 || cp == 45;
-      }
-   }
-
-   @NonNull
-   private List<String> splitWordAwareRows(@NonNull String text, int charsPerRow, float textSizePx) {
-      String collapsed = this.collapseSpaces(text);
-      if (TextUtils.isEmpty(collapsed)) {
-         return Collections.emptyList();
-      } else {
-         float maxWidthPx = this.resolveRowAvailableWidthPx() - this.rowRightReservePx;
-         if (maxWidthPx <= this.dpF(40.0F)) {
-            return this.splitByCodePointBudget(collapsed, Math.max(charsPerRow, 16));
-         } else {
-            String[] words = collapsed.split(" ");
-            List<String> rows = new ArrayList<>();
-            StringBuilder rowBuilder = new StringBuilder();
-            float rowWidthPx = 0.0F;
-            float spaceWidthPx = this.measureTextPx(" ", textSizePx);
-
-            for(int i = 0; i < words.length; ++i) {
-               String word = words[i];
-               if (!TextUtils.isEmpty(word)) {
-                  float wordWidthPx = this.measureTextPx(word, textSizePx);
-                  if (rowBuilder.length() == 0) {
-                     if (wordWidthPx <= maxWidthPx) {
-                        rowBuilder.append(word);
-                        rowWidthPx = wordWidthPx;
-                     } else {
-                        this.appendSplitLongWordByWidth(rows, word, maxWidthPx, textSizePx, charsPerRow);
-                     }
-                  } else {
-                     float mergedWidthPx = rowWidthPx + spaceWidthPx + wordWidthPx;
-                     if (mergedWidthPx <= maxWidthPx) {
-                        rowBuilder.append(' ').append(word);
-                        rowWidthPx = mergedWidthPx;
-                     } else {
-                        rows.add(rowBuilder.toString());
-                        rowBuilder.setLength(0);
-                        rowWidthPx = 0.0F;
-                        if (wordWidthPx <= maxWidthPx) {
-                           rowBuilder.append(word);
-                           rowWidthPx = wordWidthPx;
-                        } else {
-                           this.appendSplitLongWordByWidth(rows, word, maxWidthPx, textSizePx, charsPerRow);
-                        }
-                     }
-                  }
-               }
-            }
-
-            if (rowBuilder.length() > 0) {
-               rows.add(rowBuilder.toString());
-            }
-
-            return rows;
-         }
-      }
-   }
-
-   @NonNull
-   private String collapseSpaces(@NonNull String text) {
-      int[] cps = text.codePoints().toArray();
-      StringBuilder out = new StringBuilder(text.length());
-      boolean pendingSpace = false;
-
-      for(int i = 0; i < cps.length; ++i) {
-         int cp = cps[i];
-         if (Character.isWhitespace(cp)) {
-            if (out.length() > 0) {
-               pendingSpace = true;
-            }
-         } else {
-            if (pendingSpace) {
-               out.append(' ');
-               pendingSpace = false;
-            }
-
-            out.appendCodePoint(cp);
-         }
-      }
-
-      return out.toString();
-   }
-
-   private void appendSplitLongWordByWidth(@NonNull List<String> rows, @NonNull String word, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
-      int[] cps = word.codePoints().toArray();
-      if (cps.length != 0) {
-         if (!(maxWidthPx <= this.dpF(40.0F))) {
-            StringBuilder chunk = new StringBuilder();
-            float chunkWidth = 0.0F;
-
-            for(int i = 0; i < cps.length; ++i) {
-               String unit = new String(cps, i, 1);
-               float unitWidth = this.measureTextPx(unit, textSizePx);
-               if (chunk.length() == 0) {
-                  chunk.append(unit);
-                  chunkWidth = unitWidth;
-               } else if (chunkWidth + unitWidth <= maxWidthPx) {
-                  chunk.append(unit);
-                  chunkWidth += unitWidth;
-               } else {
-                  rows.add(chunk.toString());
-                  chunk.setLength(0);
-                  chunk.append(unit);
-                  chunkWidth = unitWidth;
-               }
-            }
-
-            if (chunk.length() > 0) {
-               rows.add(chunk.toString());
-            }
-
-         } else {
-            int step = Math.max(1, fallbackCharsPerRow);
-
-            for(int i = 0; i < cps.length; i += step) {
-               int end = Math.min(cps.length, i + step);
-               rows.add(new String(cps, i, end - i));
-            }
-
-         }
-      }
-   }
-
-   @NonNull
-   private List<String> splitCodePointByWidth(@NonNull String text, float maxWidthPx, float textSizePx, int fallbackCharsPerRow) {
-      int[] cps = text.codePoints().toArray();
-      if (cps.length == 0) {
-         return Collections.emptyList();
-      } else if (maxWidthPx <= this.dpF(40.0F)) {
-         return this.splitByCodePointBudget(text, fallbackCharsPerRow);
-      } else {
-         List<String> rows = new ArrayList<>();
-         StringBuilder rowBuilder = new StringBuilder();
-         float rowWidth = 0.0F;
-
-         for(int i = 0; i < cps.length; ++i) {
-            String unit = new String(cps, i, 1);
-            float unitWidth = this.measureTextPx(unit, textSizePx);
-            if (rowBuilder.length() == 0) {
-               rowBuilder.append(unit);
-               rowWidth = unitWidth;
-            } else if (rowWidth + unitWidth <= maxWidthPx) {
-               rowBuilder.append(unit);
-               rowWidth += unitWidth;
-            } else {
-               rows.add(rowBuilder.toString());
-               rowBuilder.setLength(0);
-               rowBuilder.append(unit);
-               rowWidth = unitWidth;
-            }
-         }
-
-         if (rowBuilder.length() > 0) {
-            rows.add(rowBuilder.toString());
-         }
-
-         return rows;
-      }
-   }
-
-   @NonNull
-   private List<String> splitByCodePointBudget(@NonNull String text, int budget) {
-      int[] cps = text.codePoints().toArray();
-      if (cps.length == 0) {
-         return Collections.emptyList();
-      } else {
-         int safeBudget = Math.max(1, budget);
-         List<String> rows = new ArrayList<>();
-
-         for(int i = 0; i < cps.length; i += safeBudget) {
-            int end = Math.min(cps.length, i + safeBudget);
-            rows.add(new String(cps, i, end - i));
-         }
-
-         return rows;
-      }
-   }
-
    private float resolveRowAvailableWidthPx() {
       int widthPx = this.lastWrapWidthPx;
       if (widthPx <= 0) {
@@ -6749,11 +6587,6 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
       }
 
       return (float)Math.max(1, widthPx);
-   }
-
-   private float measureTextPx(@NonNull String text, float textSizePx) {
-      this.wrapMeasurePaint.setTextSize(textSizePx);
-      return this.wrapMeasurePaint.measureText(text);
    }
 
    private long parseTimestampMs(@Nullable String hourPart, @Nullable String minutePart, @Nullable String secondPart, @Nullable String fracPart) {
@@ -7570,12 +7403,13 @@ public class NowPlayingLyricsTickerView extends FrameLayout {
 
          this.codePointTextStart[count] = utf16Cursor;
 
+         float left = 0f;
          for(int i = 0; i < count; ++i) {
-            int start = this.codePointTextStart[i];
             int end = this.codePointTextStart[i + 1];
-            this.codePointLeftPx[i] = start > 0 ? this.glyphMeasurePaint.measureText(this.currentRowText, 0, start) : 0.0F;
-            float right = end > 0 ? this.glyphMeasurePaint.measureText(this.currentRowText, 0, end) : this.codePointLeftPx[i];
-            this.codePointAdvancePx[i] = Math.max(0.0F, right - this.codePointLeftPx[i]);
+            this.codePointLeftPx[i] = left;
+            float right = this.glyphMeasurePaint.measureText(this.currentRowText, 0, end);
+            this.codePointAdvancePx[i] = Math.max(0.0F, right - left);
+            left = right;
          }
 
       }

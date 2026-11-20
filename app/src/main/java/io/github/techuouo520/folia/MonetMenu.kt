@@ -8,12 +8,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.Snapshot
@@ -103,7 +101,7 @@ internal class MonetPreferences(context: Context) {
 }
 
 @Composable
-internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean) {
+internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean, frost: FrostBackdrop) {
     val options = settings.value
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -149,20 +147,23 @@ internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean) {
     val density = LocalDensity.current
     val overlaps = !anchor.isEmpty && !panel.isEmpty &&
         panel.left < anchor.left + with(density) { dockWidth.toPx() } && panel.right > anchor.left
+    val footerBottom = rustTravel(if (LocalLyricsViewport.current.landscape) 0f else
+        (MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp).value, 14.0,
+        (MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp).value)
     val lift = rustTravel(if (overlaps) (anchor.bottom - panel.top).coerceAtLeast(0f) else 0f, 19.0)
     val inset = rustTravel(if (overlaps) with(density) { (MusicBarPanelSide - MusicBarDockSide).toPx() } else 0f, 19.0)
     Box(Modifier.align(AbsoluteAlignment.BottomLeft)
         .windowInsetsPadding(WindowInsets.safeDrawing)
         .absolutePadding(left = MusicBarDockSide, right = 16.dp,
-            bottom = MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp)
+            bottom = footerBottom.floatValue.dp)
         .onGloballyPositioned { anchor = it.boundsInRoot() }) {
         CornerBubble(modifier = Modifier.absoluteOffset { IntOffset(inset.floatValue.roundToInt(), -lift.floatValue.roundToInt()) }
             .padding(bottom = 12.dp),
-            attachedToPlayer = true, motion = motion, frame = frame, active = open || moving, right = false, frost = null, dark = dark,
+            attachedToPlayer = true, motion = motion, frame = frame, active = open || moving, right = false, frost = frost, dark = dark,
             avatar = null, label = "歌词设置", title = "歌词设置", dockWidth = dockWidth, dockHeight = dockHeight,
             artworkPlaceholder = {
                 Box(
-                    Modifier.fillMaxSize().border(1.dp, ink.copy(alpha = .14f), CircleShape),
+                    Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
                 ) {
                     Image(
@@ -174,32 +175,35 @@ internal fun BoxScope.MonetMenu(settings: MonetPreferences, dark: Boolean) {
                 }
             }, onPressed = { pressed = it }, onGeometryChanged = { Snapshot.withoutReadObservation { geometry++ } },
             onClick = { open = !open }) {
-            MonetSwitch("显示肖像拖动柄", options.showHanger) { settings.update(options.copy(showHanger = it)) }
-            MonetSwitch("显示音频频谱", options.showSpectrum) { settings.update(options.copy(showSpectrum = it)) }
-            if (options.showSpectrum) MonetChoice("频谱样式", "柱状", "曲线", options.lineSpectrum) {
-                settings.update(options.copy(lineSpectrum = it))
-            }
-            Column {
-                Text("歌词字号  ${(options.fontScale * 100).roundToInt()}%")
-                Slider(value = options.fontScale, onValueChange = {
-                    settings.update(options.copy(fontScale = (it * 20).roundToInt() / 20f))
-                }, valueRange = .7f..1.5f, steps = 15)
-            }
-            MonetSwitch("关键词着色", options.keywordColoring) { settings.update(options.copy(keywordColoring = it)) }
-            MonetChoice("宽屏肖像", "方形", "长方形", !options.squarePortrait) { settings.update(options.copy(squarePortrait = !it)) }
-            if (options.portraitPath.isNotEmpty()) MonetChoice("肖像来源", "专辑封面", "自选图片", options.useCustom) {
-                settings.update(options.copy(useCustom = it))
-            }
-            Row {
-                TextButton(enabled = !importing, onClick = { picker.launch("image/*") }) { Text(if (importing) "正在读取图片…" else "选择肖像图片") }
-                if (options.portraitPath.isNotEmpty()) TextButton(enabled = !importing, onClick = {
-                    settings.update(options.copy(portraitPath = "", useCustom = false))
-                }) { Text("清除图片") }
-            }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TextButton(enabled = !importing, onClick = { settings.update(settings.defaults) }) { Text("恢复默认") }
-                TextButton(onClick = { open = false }) { Text("完成") }
+            // A glass bubble has no Material Surface to supply its content colour.
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                MonetSwitch("显示肖像拖动柄", options.showHanger) { settings.update(options.copy(showHanger = it)) }
+                MonetSwitch("显示音频频谱", options.showSpectrum) { settings.update(options.copy(showSpectrum = it)) }
+                if (options.showSpectrum) MonetChoice("频谱样式", "柱状", "曲线", options.lineSpectrum) {
+                    settings.update(options.copy(lineSpectrum = it))
+                }
+                Column {
+                    Text("歌词字号  ${(options.fontScale * 100).roundToInt()}%")
+                    Slider(value = options.fontScale, onValueChange = {
+                        settings.update(options.copy(fontScale = (it * 20).roundToInt() / 20f))
+                    }, valueRange = .7f..1.5f, steps = 15)
+                }
+                MonetSwitch("关键词着色", options.keywordColoring) { settings.update(options.copy(keywordColoring = it)) }
+                MonetChoice("宽屏肖像", "方形", "长方形", !options.squarePortrait) { settings.update(options.copy(squarePortrait = !it)) }
+                if (options.portraitPath.isNotEmpty()) MonetChoice("肖像来源", "专辑封面", "自选图片", options.useCustom) {
+                    settings.update(options.copy(useCustom = it))
+                }
+                Row {
+                    TextButton(enabled = !importing, onClick = { picker.launch("image/*") }) { Text(if (importing) "正在读取图片…" else "选择肖像图片") }
+                    if (options.portraitPath.isNotEmpty()) TextButton(enabled = !importing, onClick = {
+                        settings.update(options.copy(portraitPath = "", useCustom = false))
+                    }) { Text("清除图片") }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(enabled = !importing, onClick = { settings.update(settings.defaults) }) { Text("恢复默认") }
+                    TextButton(onClick = { open = false }) { Text("完成") }
+                }
             }
         }
     }

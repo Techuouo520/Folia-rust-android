@@ -28,8 +28,6 @@ internal class CollectionEntry(val item: SpatialItem, val bounds: Rect,
     val style: Int, val corners: List<Offset>) {
     // A new visit is a new intent even when all geometry and the cached world are identical.
     var openRequested by mutableStateOf(true)
-    // Keep the source cover visible until this visit can present its destination.
-    var sceneReady by mutableStateOf(false)
     var progress by mutableFloatStateOf(0f)
     var parentRestored = false
     val screenToPage = android.graphics.Matrix()
@@ -107,9 +105,7 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
     content: @Composable (SpatialItem,Int,Boolean,Boolean,Boolean)->Unit) {
     val motion=remember(entry.item.key,entry.style) { CollectionMotion(if(entry.style==1) 16.0 else 18.0) }
     val closed=rememberUpdatedState(onClosed)
-    val interactive by remember(entry,active) { derivedStateOf {
-        active && entry.openRequested && entry.sceneReady && entry.progress > 0f
-    } }
+    val interactive by remember(entry,active) { derivedStateOf { active && entry.openRequested } }
     val expanded by remember(entry,active) { derivedStateOf { active && entry.openRequested && entry.progress==1f } }
     val navigation=LocalCornerNavigation.current
     DisposableEffect(navigation,entry,active) {
@@ -117,11 +113,11 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
         onDispose {if(active) navigation?.detach(entry)}
     }
     val dismiss={entry.openRequested=false}
-    BackHandler(active && entry.openRequested && !io.github.techuouo520.folia.LocalPlayerCoversPage.current && navigation?.modalOpen!=true) { dismiss() }
+    BackHandler(interactive && !io.github.techuouo520.folia.LocalPlayerCoversPage.current && navigation?.modalOpen!=true) { dismiss() }
     LaunchedEffect(entry,active) {
-        // Cancellation must be observed even while both the old and new targets are zero.
-        snapshotFlow { entry.openRequested to entry.sceneReady }.collectLatest { (requested, ready) ->
-            val target=if(active && requested && ready) 1.0 else 0.0
+        snapshotFlow {
+            when { !entry.openRequested || !active -> 0.0; else -> 1.0 }
+        }.collectLatest { target ->
             var previous=withFrameNanos {it}
             do {
                 var moving=false
@@ -157,15 +153,7 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
                 return@drawWithContent
             }
             world.record {this@drawWithContent.drawContent()}
-            if(!active || parentWorld.isReleased) return@drawWithContent
-            if(p<=0f) {
-                // TextureView must actually draw to publish its first frame. Keep the
-                // complete parent above it until the destination can start one continuous flight.
-                world.alpha=1f
-                drawLayer(world)
-                drawLayer(parentWorld)
-                return@drawWithContent
-            }
+            if(!active || p<=0f || parentWorld.isReleased) return@drawWithContent
             CollectionMorph.frame(size.width,size.height,entry.faceWidth,entry.faceHeight,
                 (if(entry.style==1) 1.dp else 6.dp).toPx(),p,geometry)
             val w=geometry[CollectionMorph.CLIP_WIDTH];val h=geometry[CollectionMorph.CLIP_HEIGHT]
@@ -204,20 +192,15 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
             entry.visibleWidth = w
             entry.visibleHeight = h
             clip.reset();clip.addRoundRect(RoundRect(Rect(0f,0f,w,h),CornerRadius(geometry[CollectionMorph.RADIUS])))
-            world.alpha=1f
+            world.alpha=geometry[CollectionMorph.CONTENT_ALPHA]
             origin.alpha=geometry[CollectionMorph.ORIGIN_ALPHA]
             withTransform({transform(matrix)}) {
                 clipPath(clip) {
                     drawRect(ground,size=androidx.compose.ui.geometry.Size(w,h))
                     drawLayer(world)
-                    // Fill the changing aspect ratio without stretching or exposing the ground.
-                    val coverScale=max(w/entry.faceWidth,h/entry.faceHeight)
-                    val left=(w-entry.faceWidth*coverScale)*.5f
-                    val top=(h-entry.faceHeight*coverScale)*.5f
-                    withTransform({
-                        translate(left,top)
-                        scale(coverScale,coverScale,Offset.Zero)
-                    }) { drawLayer(origin) }
+                    // Preserve the card's aspect ratio while its container grows; never stretch
+                    // a low-resolution thumbnail to the entire secondary world.
+                    scale(w/entry.faceWidth,w/entry.faceWidth,Offset.Zero) { drawLayer(origin) }
                 }
             }
         }) {

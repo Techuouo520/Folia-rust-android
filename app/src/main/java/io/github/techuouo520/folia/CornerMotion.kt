@@ -72,11 +72,16 @@ internal class CornerMotion(val bottomOrigin: Boolean = false, initiallyOpen: Bo
     /** Live resting outline from the same bubble motion; changing it never restarts the window. */
     fun dockBounds(rect: CornerRect) { dock=rect }
 
-    fun bounds(width: Float, height: Float?, right: Boolean): Boolean {
+    fun bounds(width: Float, height: Float?, right: Boolean, liveHeight: Boolean = false): Boolean {
         var changed=false
         this.width = width.coerceAtLeast(CORNER_BUTTON_DIAMETER)
         this.right = right
-        if (height != null && (opening || docked)) {
+        if (height != null && liveHeight) {
+            // The outer reflow already integrates height. A second resize spring would
+            // reset its velocity on each frame and leave the outline behind its content.
+            state[11]=height.coerceAtLeast(CORNER_BUTTON_DIAMETER)
+            wantedHeight=state[11]; resizeFromHeight=state[11]; measured=true; resize(1f,false)
+        } else if (height != null && (opening || docked)) {
             val next=height.coerceAtLeast(CORNER_BUTTON_DIAMETER)
             if (!measured || docked) {
                 state[11] = next; wantedHeight = next; resize(1f, false); measured = true

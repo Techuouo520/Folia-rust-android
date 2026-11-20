@@ -48,38 +48,46 @@ internal fun MonetLyrics(bridge: FoliaBridge, playback: PlaybackSnapshot, dark: 
     val show = admitted || selected || (radio && identity != null && radioOwner == identity)
     LaunchedEffect(show) { if (show) admitted = true }
     val source = identity.takeIf { show }
-    var status by remember(source, dark) { mutableIntStateOf(0) }
+    // A palette update is not a new lyric request. Keep the prepared page visible
+    // while the existing renderer/ticker repaint their colors in place.
+    var status by remember(source) { mutableIntStateOf(0) }
     val ground = if (dark) Color(0xFF09090B) else Color(0xFFF9F7F3)
+    val viewport = LocalLyricsViewport.current
     val context = LocalContext.current
     val rendering = active && !LocalPlayerCoversPage.current
     val settings = remember(context) { MonetPreferences(context) }
     var posterView by remember { mutableStateOf<MonetPosterView?>(null) }
+    val frost = rememberFrostBackdrop()
     Box(Modifier.fillMaxSize().background(ground)) {
-        AndroidView(factory = { MonetPosterView(it, bridge).also { view -> posterView = view } }, modifier = Modifier.fillMaxSize(),
-            onRelease = { if (posterView === it) posterView = null; it.release() }, update = {
-                it.poster.onPortraitOffset = { x -> settings.update(settings.value.copy(portraitOffset = x)) }
-                it.report = { result -> status = result; onStatus(result) }
-                it.update(source, playback, dark, settings.value, rendering)
-            })
-        if (source == null || status != 1) {
-            val background = if (source != null && status == 2) Color.Transparent else ground
-            Box(Modifier.fillMaxSize().background(background), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(when {
-                        source == null -> bridge.t("ui.noTrack")
-                        status == 2 -> bridge.t("ui.noLyricsAvailable")
-                        status == 3 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("ui.visualizer"))
-                        status == 5 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("localMusic.lyrics"))
-                        else -> bridge.t("home.loading")
-                    }, color = if (dark) Color(0xFFB8B8BD) else Color(0xFF625C56), fontSize = 15.sp)
-                    if (source != null && (status == 3 || status == 5)) {
-                        TextButton(onClick = { posterView?.retryLyrics() }) { Text(bridge.t("search.retry")) }
+        // The settings surface stays outside its source throughout expansion and reversal.
+        Box(Modifier.fillMaxSize().frostSource(frost)) {
+            AndroidView(factory = { MonetPosterView(it, bridge).also { view -> posterView = view } }, modifier = Modifier.fillMaxSize(),
+                onRelease = { if (posterView === it) posterView = null; it.release() }, update = {
+                    it.poster.onFramePresented = frost::sourceFramePresented
+                    it.poster.onPortraitOffset = { x -> settings.update(settings.value.copy(portraitOffset = x)) }
+                    it.report = { result -> status = result; onStatus(result) }
+                    it.update(source, playback, dark, settings.value, rendering, viewport)
+                })
+            if (source == null || status != 1) {
+                val background = if (source != null && status == 2) Color.Transparent else ground
+                Box(Modifier.fillMaxSize().background(background), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(when {
+                            source == null -> bridge.t("ui.noTrack")
+                            status == 2 -> bridge.t("ui.noLyricsAvailable")
+                            status == 3 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("ui.visualizer"))
+                            status == 5 -> bridge.t("playlist.loadFailed").replace("{{error}}", bridge.t("localMusic.lyrics"))
+                            else -> bridge.t("home.loading")
+                        }, color = if (dark) Color(0xFFB8B8BD) else Color(0xFF625C56), fontSize = 15.sp)
+                        if (source != null && (status == 3 || status == 5)) {
+                            TextButton(onClick = { posterView?.retryLyrics() }) { Text(bridge.t("search.retry")) }
+                        }
                     }
                 }
             }
+            if (controlsVisible && rendering && source != null && (status == 1 || status == 2)) SponsorFooter(bridge)
         }
-        if (controlsVisible && rendering && source != null && (status == 1 || status == 2)) SponsorFooter(bridge)
-        if (controlsVisible) MonetMenu(settings, dark)
+        if (controlsVisible) MonetMenu(settings, dark, frost)
     }
 }
 
@@ -87,10 +95,15 @@ internal fun MonetLyrics(bridge: FoliaBridge, playback: PlaybackSnapshot, dark: 
  * camera at any time without waiting for GPU creation or a pending present. */
 internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     TextureView(context), TextureView.SurfaceTextureListener {
-    private data class Scene(val song: ArtworkOwner?, val dark: Boolean, val playing: Boolean, val options: MonetOptions, val active: Boolean)
+    private data class Scene(val song: ArtworkOwner?, val dark: Boolean, val playing: Boolean, val options: MonetOptions, val active: Boolean, val viewport: LyricsViewport)
     private var requested: Scene? = null
     private var songGeneration = 0L
     private var serial = 0
+    // A surface resize and the Compose viewport arrive independently. A rejected
+    // geometry packet must be retried even if Rust's numeric bounds stay unchanged.
+    private var layoutSerial = 0
+    private var workerLayoutSerial = 0
+    private var railDirty = true
     private var disposed = false
     private val thread = HandlerThread("Folia Monet").apply { start() }
     private val worker = Handler(thread.looper)
@@ -98,6 +111,7 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     var onRail: (List<Float>?, List<MonetTickerLine>?) -> Unit = { _, _ -> }
     var onPortraitOffset: (Float) -> Unit = {}
+    var onFramePresented: () -> Unit = {}
     var report: (Int) -> Unit = {}
 
     // Everything below belongs to this surface's Looper, including its vsync registration.
@@ -128,18 +142,22 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     private external fun detach()
     private external fun pointer(kind: Int, x: Float, y: Float, delta: Float)
 
-    private external fun drawFrame(width: Int, height: Int, density: Float, dark: Boolean): Int
+    private external fun drawFrame(width: Int, height: Int, density: Float, dark: Boolean, left: Float, top: Float, right: Float, bottom: Float): Int
 
     init { surfaceTextureListener = this }
 
-    fun update(owner: ArtworkOwner?, dark: Boolean, playing: Boolean, options: MonetOptions, active: Boolean) {
-        val next = Scene(owner, dark, playing, options, active)
+    fun update(owner: ArtworkOwner?, dark: Boolean, playing: Boolean, options: MonetOptions, active: Boolean, viewport: LyricsViewport) {
+        val next = Scene(owner, dark, playing, options, active, viewport)
         if (requested == next || disposed) return
         if (requested?.song != owner) songGeneration++
         val generation = songGeneration
+        val layoutChanged = requested?.viewport != viewport || requested?.options != options || requested?.song != owner
+        val revision = if (layoutChanged) ++layoutSerial else layoutSerial
         requested = next
         worker.post {
             workerSongGeneration = generation
+            workerLayoutSerial = revision
+            railDirty = railDirty || layoutChanged
             if (scene?.song != owner) selected = null
             if (scene?.song != owner || scene?.dark != dark) lastStatus = -1
             scene = next
@@ -159,10 +177,13 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     private fun attachSurface(texture: SurfaceTexture, width: Int, height: Int, retryLyrics: Boolean) {
         if (disposed) return
         val id = ++serial
+        val revision = ++layoutSerial
         val surface = Surface(texture)
         val shown = isShown && windowVisibility == VISIBLE
         worker.post {
             surfaceId = id
+            workerLayoutSerial = revision
+            railDirty = true
             selected = null
             applied = null
             lastStatus = -1
@@ -192,10 +213,14 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     }
 
     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
-        worker.post { surfaceWidth = width; surfaceHeight = height; wake() }
+        val revision = ++layoutSerial
+        worker.post {
+            surfaceWidth = width; surfaceHeight = height
+            workerLayoutSerial = revision; railDirty = true; wake()
+        }
     }
 
-    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) { onFramePresented() }
 
     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
         ++serial
@@ -239,6 +264,9 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
         val owner = current.song ?: return
         val id = surfaceId
         val generation = workerSongGeneration
+        val revision = workerLayoutSerial
+        val drawnWidth = surfaceWidth
+        val drawnHeight = surfaceHeight
         val result = try {
             if (selected != owner) {
                 bridge.selectMonet(owner.id, owner.provider, owner.song)
@@ -248,20 +276,31 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
                 bridge.configureMonet(current.options)
                 applied = current.options
             }
-            drawFrame(surfaceWidth, surfaceHeight, density, current.dark)
+            drawFrame(surfaceWidth, surfaceHeight, density, current.dark, current.viewport.left,
+                current.viewport.top, current.viewport.right, current.viewport.bottom)
         } catch (e: Exception) {
             android.util.Log.e("FoliaMonet", "Could not draw lyrics", e)
             3
         }
         val status = result and 15
         val lines = if (result and 16 != 0) bridge.monetTickerLines() else null
-        val bounds = if (result and 32 != 0) bridge.monetTickerBounds() else null
+        val bounds = if (result and 32 != 0 || railDirty)
+            bridge.monetTickerBounds().takeIf { it.size == 6 } else null
+        if (bounds != null) railDirty = false
         val offset = result ushr 8
         if ((status != 4 && status != lastStatus) || offset != 0 || bounds != null || lines != null) {
             if (status != 4) lastStatus = status
             post {
                 if (id == serial && generation == songGeneration && !disposed && requested?.song == owner) {
-                    if (bounds != null || lines != null) onRail(bounds, lines)
+                    val geometryCurrent = revision == layoutSerial && width == drawnWidth && height == drawnHeight &&
+                        requested?.viewport == current.viewport && current.viewport.landscape == (drawnWidth > drawnHeight)
+                    if (bounds != null || lines != null) onRail(bounds.takeIf { geometryCurrent }, lines)
+                    if (bounds != null && !geometryCurrent) worker.post {
+                        // The previous packet was not applied. Do not depend on Rust's
+                        // change bit being raised a second time for the same final bounds.
+                        railDirty = true
+                        wake()
+                    }
                     if (status != 4 && requested?.dark == current.dark) report(status)
                     if (offset != 0) onPortraitOffset((1 - offset).toFloat())
                 }
@@ -315,6 +354,7 @@ internal class MonetView(context: Context, private val bridge: FoliaBridge) :
     override fun performClick(): Boolean { super.performClick(); return true }
     fun release() {
         disposed = true
+        onFramePresented = {}
         ++serial
         worker.post { stopSurface(); thread.quitSafely() }
     }

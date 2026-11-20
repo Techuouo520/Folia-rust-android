@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="permission_storage_title">允许访问音乐</string>
+    <string name="permission_storage_category">本地音乐 · 文件访问</string>
+    <string name="permission_storage_return">授权后返回 Folia，将自动继续。</string>
     <string name="permission_storage_body">Folia 会读取你指定的音乐目录，包括歌曲旁边的歌词文件。请在系统设置中允许访问所有文件。</string>
     <string name="permission_storage_action">打开设置</string>
     <string name="permission_storage_legacy_body">Folia 会读取你指定的音乐目录，包括歌曲旁边的歌词文件。请允许存储访问。</string>

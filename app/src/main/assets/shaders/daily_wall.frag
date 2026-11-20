@@ -20,21 +20,27 @@ in float v_shade;
 out vec4 color;
 uniform float u_zoom;
 flat in float v_lyrics;
+vec2 coverDx,coverDy;
 vec3 coverSample(vec2 uv){
  float blend=0.;
  if(v_info.w>.5){
   int layer=clamp(int(v_info.x),0,96);
   blend=smoothstep(0.,1.,u_cover_blend[layer/4][layer%4]);
-  if(blend>=1.)return textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
+  if(blend>=1.)return textureGrad(u_covers,vec3(uv,v_info.x),coverDx,coverDy).rgb;
  }
  vec3 preview=vec3(mix(.89,.12,u_dark));
  if(v_preview.z>.5)preview=textureLod(u_previews,(v_preview.xy+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
  if(blend<=0.)return preview;
- vec3 high=textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
+ vec3 high=textureGrad(u_covers,vec3(uv,v_info.x),coverDx,coverDy).rgb;
  return mix(preview,high,blend);
 }
 // COVER_LYRICS_CHIP
 void main(){
+ // Derivatives must precede discard/face branches. The projected footprint picks
+ // and blends mip levels continuously, including the cover's curved projection.
+ vec2 local=v_uv*v_size;float side=min(v_size.x,v_size.y);
+ vec2 artUv=local/side;
+ coverDx=dFdx(artUv);coverDy=dFdy(artUv);
  if(abs(v_preview.w)<.001)discard;
  if(v_info.y<.5&&u_mode>.01&&(abs(v_angles.x)>1.22||abs(v_angles.y)>1.22))discard;
  float radius=v_info.y>.5?u_lift_radius:mix(12.0,6.0,u_mode);
@@ -42,12 +48,11 @@ void main(){
  float d=length(max(q,0.0))+min(max(q.x,q.y),0.0)-radius;
  float aa=max(fwidth(d),.3),alpha=1.0-smoothstep(-aa,aa,d);
  if(alpha<.001)discard;
- vec2 local=v_uv*v_size;float side=min(v_size.x,v_size.y);
  bool artwork=local.x<=side&&local.y<=side;
  // The extension is a single extracted album color. It never samples artwork UVs.
  vec3 rgb=mix(vec3(mix(.96,.028,u_dark)),v_material.rgb,mix(.20,.32,u_dark));
  if(artwork){
-  vec2 uv=local/side;
+  vec2 uv=artUv;
   rgb=coverSample(uv);
   if(v_lyrics>.5)rgb=printLyricsChip(uv,rgb,side*mix(1.,u_zoom,u_mode));
  }

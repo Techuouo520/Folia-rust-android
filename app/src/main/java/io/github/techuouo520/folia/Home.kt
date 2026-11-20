@@ -77,7 +77,6 @@ internal fun HomePage(
     notificationsGranted: Boolean,
     onRequestNotifications: () -> Unit,
     onOpenPlayer: () -> Unit,
-    preloadPlayerLyrics: Boolean,
     playerProgress: androidx.compose.runtime.FloatState,
     playerFootprint: androidx.compose.ui.unit.Dp,
     frost: FrostBackdrop,
@@ -118,18 +117,16 @@ internal fun HomePage(
     val items = remember(tab, shell.tracks, home.cards, home.explore, signedIn) {
         wallItems(tab, shell.tracks, home, signedIn)
     }
+    val overlayCovered = LocalPlayerCoversPage.current
     val pageCovered by remember { derivedStateOf { playerProgress.floatValue > .001f } }
-    val navigation = LocalCornerNavigation.current
-    val playerLyricsOpen = navigation?.playerLyricsOpen == true
-    val hasPlayer = true
     val bottomSafe=WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
     val playerInset = playerFootprint + bottomSafe
     val density = androidx.compose.ui.platform.LocalDensity.current
     var controlsInset by remember { mutableStateOf(0.dp) }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.fillMaxSize().then(if (hasPlayer) Modifier.frostSource(frost) else Modifier)) {
-                Box(Modifier.fillMaxSize().then(if (playerLyricsOpen) Modifier.clearAndSetSemantics {} else Modifier).graphicsLayer {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().then(if (overlayCovered) Modifier.clearAndSetSemantics {} else Modifier).graphicsLayer {
                     val p = playerProgress.floatValue
                     scaleX = playerMix(1f,.85f,playerSmooth(0f,1f,p))
                     scaleY = scaleX
@@ -137,7 +134,7 @@ internal fun HomePage(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(screenCorner.dp)
                     clip = p > 0f
                 }) {
-                    CompositionLocalProvider(LocalPlayerCoversPage provides (pageCovered || playerLyricsOpen)) {
+                    CompositionLocalProvider(LocalPlayerCoversPage provides (pageCovered || overlayCovered)) {
                         if (online && session.phase != SessionPhase.SIGNED_IN) {
                             Guest(bridge, session.phase == SessionPhase.RESOLVING)
                         } else if (items.isEmpty()) {
@@ -161,7 +158,6 @@ internal fun HomePage(
                         }
                     }
                 }
-                PlayerLyricsPage(bridge, shell.playback, playerLyricsOpen, preloadPlayerLyrics)
             }
 
         }

@@ -1,6 +1,28 @@
 //! Scene, interaction, cache and lifecycle regression coverage.
 use super::*;
 
+ #[test]fn screen_edge_fades_follow_viewport_for_both_map_styles(){
+  let mut map=State::new();let mut rhine=rhine::Rhine::new();let mut out=vec![0.;FLOATS];
+  map.command(0,64,0.,0.);map.mode.jump(1.);
+  rhine.command(0,64,0.,0.);rhine.common.mode.jump(1.);
+  for (w,h) in [(400.,890.),(1024.,600.),(890.,400.),(400.,890.)]{
+   for is_rhine in [false,true]{
+    if is_rhine{rhine.frame(0.,w,h,&mut out);}else{map.frame(0.,w,h,&mut out);}
+    if w>h{
+     assert_eq!([out[26],out[27],out[30]],[0.,h,0.]);
+     for y in [0.,1.,h/2.,h-1.,h]{assert_eq!(crate::render_policy::edge_factor(y,h,out[26],out[27]),0.);}
+     if !is_rhine{for slot in 0..out[16]as usize{let o=HEADER+slot*STRIDE;
+      if out[o+12]>0.{assert_eq!(out[o+6],1.,"landscape labels must not retain portrait edge fading");}
+     }}
+    }else{
+     assert!(out[26]>0.&&out[27]<h);assert_eq!(out[30],1.);
+     assert_eq!(crate::render_policy::edge_factor(0.,h,out[26],out[27]),1.);
+     assert_eq!(crate::render_policy::edge_factor(h,h,out[26],out[27]),1.);
+    }
+   }
+  }
+ }
+
  #[test]fn stable_catalogue_and_shared_boundaries(){
   for i in 0..2000{let(x,y)=block(i);assert_eq!(block_index(x,y),i);}
   let mut s=State::new();assert!(s.command(0,96,0.,0.));
@@ -85,6 +107,58 @@ use super::*;
    assert!(!(0..count).any(|i|out[HEADER+i*STRIDE]==song));
    assert!(!(0..n).any(|i|out[HEADER+STRIDE*SLOTS+i]==song));
   }
+ }
+ #[test]fn camera_gestures_keep_caption_alpha_and_geometry(){
+  let mut s=State::new();let mut out=vec![0.;FLOATS];
+  s.command(0,1024,0.,0.);s.mode.jump(1.);
+  s.frame(0.,400.,890.,&mut out);
+  let start=(out[2],out[3]);let mut saw_motion=false;
+  for tick in 0..240{
+   match tick{
+    0..=59=>{s.command(4,0,12.,-6.);}
+    60=>{s.command(5,0,1800.,-900.);}
+    100..=129=>{s.command(4,0,-16.,8.);}
+    130=>{s.command(5,0,-1800.,900.);}
+    160=>{s.command(11,0,0.,0.);}
+    161..=179=>{s.command(12,0,1.01,0.);}
+    180=>{s.command(13,0,0.,0.);}
+    _=>{}
+   }
+   assert!(s.frame(1./120.,400.,890.,&mut out));
+   saw_motion|=out[24]>0.;
+   assert_eq!(out[15],1.,"camera motion hid captions at frame {tick}");
+   assert!((0..out[16]as usize).any(|n|{
+    let o=HEADER+n*STRIDE;out[o+6]>0.1&&out[o+12]>0.&&out[o+13]>0.
+   }),"visible caption geometry missing at frame {tick}");
+  }
+  assert!(saw_motion);assert_ne!(start,(out[2],out[3]));
+ }
+ #[test]fn caption_layout_metrics_ignore_camera_but_follow_card_geometry(){
+  let mut s=State::new();let mut out=vec![0.;FLOATS];
+  s.command(0,1024,0.,0.);s.mode.jump(1.);s.frame(0.,700.,890.,&mut out);
+  let mut metrics=HashMap::new();
+  let mut projected=HashMap::new();
+  let mut changed_projection=false;let mut compared=0;
+  for tick in 0..80{
+   s.command(4,0,3.,-2.);
+   if tick==40{s.command(6,0,1.2,0.);}
+   s.frame(1./120.,700.,890.,&mut out);
+   for slot in 0..out[16]as usize{
+    let o=HEADER+slot*STRIDE;let cell=out[o+7]as usize;let m=MAP_CAPTIONS+slot*16;
+    let native=[out[m],out[m+1],out[m+2]];
+    let(_,_,w,h,_,font)=caption_region(s.live(cell));assert_eq!(native,[w,h,font]);
+    if let Some(previous)=metrics.insert(cell,native){assert_eq!(previous,native);compared+=1;}
+    if let Some(previous)=projected.insert(cell,out[o+12]){changed_projection|=previous!=out[o+12];}
+   }
+  }
+  assert!(compared>100&&changed_projection);
+  // A real card expansion still publishes its new native text region.
+  s.command(2,0,1.,0.);
+  for _ in 0..180{s.frame(1./120.,700.,890.,&mut out);}
+  let slot=s.visible.iter().position(|(cell,_)|*cell==s.playing.unwrap()).unwrap();
+  let m=MAP_CAPTIONS+slot*16;let(_,_,w,h,_,font)=caption_region(s.live(s.playing.unwrap()));
+  assert_eq!([out[m],out[m+1],out[m+2]],[w,h,font]);
+  assert_ne!(metrics[&0],[w,h,font]);
  }
  #[test]fn hidden_caption_geometry_is_deferred_and_restored(){
   let mut s=State::new();let mut out=vec![0.;FLOATS];

@@ -27,6 +27,60 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
     private var rowsReady = false
     private var rowsFailed = false
     private var posterStatus = 0
+    private var viewport = LyricsViewport()
+    // FLIP only the retained rail's presentation. Text is measured once at the final
+    // width; Rust springs carry position/velocity through another resize mid-flight.
+    private val railMotion = Array(5) { doubleArrayOf(0.0, 0.0) }
+    private val railTarget = DoubleArray(5)
+    private val railClip = android.graphics.Rect()
+    private var railInitialized = false
+    private var railAnimating = false
+    private var railFrameTime = 0L
+    private val railClock get() = android.view.Choreographer.getInstance()
+    private val railFrame = object : android.view.Choreographer.FrameCallback {
+        override fun doFrame(now: Long) {
+            val dt = if (railFrameTime == 0L) 1.0/60.0 else (now-railFrameTime)/1e9
+            railFrameTime = now
+            var moving = false
+            for (i in 0..4) moving = MotionKernel.travel(railMotion[i], railTarget[i], dt, 14.0, true) || moving
+            railAnimating = moving
+            applyRailTransform()
+            if (moving) railClock.postFrameCallback(this)
+        }
+    }
+
+    private fun applyRailTransform() {
+        ticker?.apply {
+            pivotX = 0f; pivotY = 0f
+            translationX = (railMotion[0][0]-railTarget[0]).toFloat()
+            translationY = (railMotion[1][0]-railTarget[1]).toFloat()
+            // Preserve glyph proportions. The viewport changes independently of font
+            // scale; stretching a portrait-height rail into landscape distorts text.
+            val fontScale = (railMotion[4][0]/railTarget[4].coerceAtLeast(1.0)).toFloat().coerceAtLeast(.01f)
+            scaleX = fontScale
+            scaleY = fontScale
+            railClip.set(0, 0, (railMotion[2][0]/fontScale).roundToInt().coerceAtLeast(1),
+                (railMotion[3][0]/fontScale).roundToInt().coerceAtLeast(1))
+            clipBounds = if (railAnimating) railClip else null
+            if (!railAnimating) {
+                translationX=0f; translationY=0f; scaleX=1f; scaleY=1f
+            }
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (railInitialized && rowsReady && !railAnimating) {
+            railAnimating=true; railFrameTime=0L
+            railClock.postFrameCallback(railFrame)
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        railClock.removeFrameCallback(railFrame)
+        railAnimating = false
+        super.onDetachedFromWindow()
+    }
     var report: (Int) -> Unit = {}
 
     init {
@@ -92,11 +146,26 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
         params.leftMargin = rect[0].roundToInt()
         params.topMargin = rect[1].roundToInt()
         params.gravity = android.view.Gravity.LEFT or android.view.Gravity.TOP
-        view.layoutParams = params
-        view.setMonetTextSize(rect[4], rect[5])
+        val targets = doubleArrayOf(params.leftMargin.toDouble(), params.topMargin.toDouble(),
+            params.width.toDouble(), params.height.toDouble(), rect[4].toDouble())
+        val changed = !targets.contentEquals(railTarget)
+        for (i in 0..4) {
+            railTarget[i] = targets[i]
+            if (!railInitialized || !rowsReady) { railMotion[i][0] = targets[i]; railMotion[i][1] = 0.0 }
+        }
+        railInitialized = true
+        if (changed) view.layoutParams = params
+        if (changed && rowsReady && !railAnimating) {
+            railAnimating = true
+            railFrameTime = 0L
+            railClock.postFrameCallback(railFrame)
+        }
+        applyRailTransform()
+        view.setMonetTextSize(rect[4], rect[5], viewport.landscape)
     }
 
-    fun update(song: ArtworkOwner?, snapshot: PlaybackSnapshot, night: Boolean, options: MonetOptions, visible: Boolean) {
+    fun update(song: ArtworkOwner?, snapshot: PlaybackSnapshot, night: Boolean, options: MonetOptions, visible: Boolean, viewport: LyricsViewport) {
+        this.viewport = viewport
         val changed = owner != song
         if (changed) {
             resetTicker()
@@ -116,7 +185,7 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
         position = nextPosition
         publish()
         if (clockChanged && rowsReady && active) ticker?.setPlaybackState(position, playing)
-        poster.update(song, night, playing, options, visible)
+        poster.update(song, night, playing, options, visible, viewport)
     }
 
     private fun publish() {
@@ -158,6 +227,8 @@ internal class MonetPosterView(context: Context, bridge: FoliaBridge) : FrameLay
     }
 
     fun release() {
+        railClock.removeFrameCallback(railFrame)
+        railAnimating = false
         resetTicker()
         ticker?.let(::removeView)
         ticker = null

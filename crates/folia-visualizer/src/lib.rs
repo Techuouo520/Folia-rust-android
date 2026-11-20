@@ -1,6 +1,7 @@
 // Lyric animation styles drawn on an iced canvas. A frame is playback time plus the current audio frame.
 
 mod anim;
+pub mod mobile_layout;
 mod theme_icons;
 mod monet_appearance;
 pub use monet_appearance::{MonetAppearance, Typography};

@@ -35,7 +35,8 @@ void main(){
  // At full blur only one background lookup remains; skip sharp/depth/edge texture traffic.
  if(u_context_mix<.9999){
   float y=(1.0-v_uv.y)*u_height;
-  float edge=max(1.0-smoothstep(0.0,u_depth_policy.x,y),smoothstep(u_depth_policy.y,u_height,y));
+  float edge=0.0;
+  if(u_depth_policy.w>0.0)edge=max(1.0-smoothstep(0.0,u_depth_policy.x,y),smoothstep(u_depth_policy.y,u_height,y));
   vec3 sharp=texture(u_scene,uv).rgb;
   rgb=sharp;
   if(edge>.0001){

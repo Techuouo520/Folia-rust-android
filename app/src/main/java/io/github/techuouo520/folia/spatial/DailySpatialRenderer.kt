@@ -41,7 +41,6 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     private var processedSequence:Long = 0
     private var pendingMotionState:Long = 0
     private var lastMotionStep:Long = 0
-    @Volatile private var frameStartedNanos:Long = 0
     private var pendingWidth:Float = 0.toFloat()
     private var pendingHeight:Float = 0.toFloat()
     private var pendingResetClock:Boolean = false
@@ -200,9 +199,6 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         var crop:Rect? = null
         var displayCrop:Rect? = null
         var snapshot:FloatArray? = null
-    }
-    fun frameStartedNanos():Long {
-        return frameStartedNanos
     }
     private class ArtworkPlan( val ready:Runnable?,  val epoch:Int, frame:FloatArray?,  val holdScene:Boolean) {
         val assets:ArrayList<CoverAsset> = ArrayList()
@@ -801,7 +797,6 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         try
         {
             val now = System.nanoTime()
-            frameStartedNanos = now
             val dt = if (reset || lastMotionStep == 0L) 0f else Math.max(0f, (now - lastMotionStep) / 1_000_000_000f)
             android.os.Trace.beginSection("Daily.RustScene")
             try
@@ -959,8 +954,8 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         GLES30.glGenTextures(1, ids, 0)
         coverTexture = ids[0]
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D_ARRAY, coverTexture)
-        GLES30.glTexStorage3D(GLES30.GL_TEXTURE_2D_ARRAY, 1, GLES30.GL_RGBA8, SIZE, SIZE, HIGH + 1)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D_ARRAY, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexStorage3D(GLES30.GL_TEXTURE_2D_ARRAY, DailySpatialCovers.MIPMAPS.levels.size, GLES30.GL_RGBA8, SIZE, SIZE, HIGH + 1)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D_ARRAY, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D_ARRAY, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D_ARRAY, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D_ARRAY, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
@@ -1303,16 +1298,20 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             {
                 GLES30.glGenBuffers(1, uploadPbos, slot)
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, uploadPbos[slot])
-                GLES30.glBufferData(GLES30.GL_PIXEL_UNPACK_BUFFER, SIZE * SIZE * 4, null, GLES30.GL_STREAM_DRAW)
+                GLES30.glBufferData(GLES30.GL_PIXEL_UNPACK_BUFFER, DailySpatialCovers.MIPMAPS.bytes, null, GLES30.GL_STREAM_DRAW)
             }
             else
             GLES30.glBindBuffer(GLES30.GL_PIXEL_UNPACK_BUFFER, uploadPbos[slot])
             try
             {
                 pixels!!.position(0)
-                GLES30.glBufferSubData(GLES30.GL_PIXEL_UNPACK_BUFFER, 0, SIZE * SIZE * 4, pixels)
+                GLES30.glBufferSubData(GLES30.GL_PIXEL_UNPACK_BUFFER, 0, DailySpatialCovers.MIPMAPS.bytes, pixels)
                 GLES30.glBindTexture(GLES30.GL_TEXTURE_2D_ARRAY, coverTexture)
-                GLES30.glTexSubImage3D(GLES30.GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, SIZE, SIZE, 1, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, 0)
+                for ((index, level) in DailySpatialCovers.MIPMAPS.levels.withIndex()) {
+                    GLES30.glTexSubImage3D(GLES30.GL_TEXTURE_2D_ARRAY, index, 0, 0, layer, level.side, level.side, 1, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, level.offset)
+                }
+                // Publish only after every level has been submitted; one fence protects
+                // the complete packed PBO from reuse while the GPU is still reading it.
                 uploadFences[slot] = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
                 if (uploadFences[slot] == 0L) throw IllegalStateException("HD staging fence unavailable")
             }
@@ -1531,7 +1530,11 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             SpatialNative.dailySpatialCommand(warmState, 2, 0, (1).toFloat(), (0).toFloat())
             // Initialize the otherwise unused layer zero so the high-res sampler is exercised.
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D_ARRAY, coverTexture)
-            GLES30.glTexSubImage3D(GLES30.GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, SIZE, SIZE, 1, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, ByteBuffer.allocateDirect(SIZE * SIZE * 4))
+            val blank = ByteBuffer.allocateDirect(SIZE * SIZE * 4)
+            for ((index, level) in DailySpatialCovers.MIPMAPS.levels.withIndex()) {
+                blank.position(0)
+                GLES30.glTexSubImage3D(GLES30.GL_TEXTURE_2D_ARRAY, index, 0, 0, 0, level.side, level.side, 1, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, blank)
+            }
             for (phase in 0..2)
             {
                 if (!SpatialNative.dailySpatialStep(warmState, .25f, width / density, height / density, (sceneBytes)!!)) throw IllegalStateException("Daily warm scene failed")
@@ -1741,6 +1744,11 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         }
     }
     private fun filterBackground(context:Boolean) {
+        // Landscape has no screen-edge blur. Context/lift glass is a separate material.
+        if (frame[30] <= 0f) {
+            if (context) filterContext()
+            return
+        }
         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
         GLES30.glDisable(GLES30.GL_DEPTH_TEST)
         GLES30.glDisable(GLES30.GL_BLEND)

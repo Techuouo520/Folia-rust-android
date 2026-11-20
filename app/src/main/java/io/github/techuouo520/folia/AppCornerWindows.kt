@@ -21,6 +21,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import io.github.techuouo520.folia.bridge.*
 import io.github.techuouo520.folia.spatial.*
 import kotlinx.coroutines.*
@@ -53,6 +54,12 @@ internal fun AppCornerWindows(bridge: FoliaBridge,playerInFront: Boolean,player:
         }
     }
     val navigation=remember {CornerNavigation()}
+    val viewport = LocalLyricsViewport.current
+    // Keep absolute anchors alive across viewport changes; the attached gear reads
+    // the very same card pose as MusicBar, so it cannot lag behind a second animator.
+    val leftAnchor=rustTravel(viewport.left+10f,14.0,viewport.left+10f)
+    val rightAnchor=rustTravel(viewport.width-viewport.right-10f,14.0,viewport.width-viewport.right-10f)
+    val topAnchor=rustTravel(viewport.top+4f,14.0,viewport.top+4f)
     var backPressed by remember {mutableStateOf(false)}
     val turn = remember { floatArrayOf(0f,0f,0f,1f,90f) }
     val dockMotion=remember {CornerMotion().apply {bounds(CORNER_BUTTON_DIAMETER,CORNER_BUTTON_DIAMETER*2,false)}}
@@ -108,23 +115,49 @@ internal fun AppCornerWindows(bridge: FoliaBridge,playerInFront: Boolean,player:
                 val right=name=="settings"
                 // Separate root siblings: the modal scrim covers both idle buttons; the active
                 // window remains above the scrim, its sibling button, the player and the scene.
-                Box(Modifier.fillMaxSize().then(if(playerInFront) Modifier.clearAndSetSemantics {} else Modifier)
-                    .zIndex(if(owner==name) 2f else 0f)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(start=10.dp,end=10.dp,top=4.dp,bottom=10.dp)) {
+                val f=navigation.cardFusion.coerceIn(0f,1f)
+                val panelWidth=(viewport.width-viewport.left-viewport.right-20f).coerceIn(50f,420f)
+                val card=navigation.playerCard
+                val buttonSize=CORNER_BUTTON_DIAMETER+(LandscapeCardButtonSize.value-CORNER_BUTTON_DIAMETER)*f
+                // Size/material use the card's existing Rust fusion channel, including
+                // mid-flight reversals. The expanded settings sheet remains full opacity.
+                if(right) SideEffect {
+                    settingsMotion.dockBounds(CornerRect(CORNER_BUTTON_DIAMETER-buttonSize,0f,
+                        CORNER_BUTTON_DIAMETER,buttonSize))
+                }
+                val end=rightAnchor.floatValue*(1f-f)+(card.right-LandscapeCardButtonInset.value)*f
+                val y=topAnchor.floatValue*(1f-f)+(card.top+LandscapeCardButtonInset.value)*f
+                val hiddenAccount=!right && owner!="account"
+                val inputHidden=hiddenAccount && f>.01f
+                Box(Modifier.fillMaxSize()
+                    .then(if(playerInFront || inputHidden) Modifier.clearAndSetSemantics {} else Modifier)
+                    .zIndex(if(owner==name) 2f else if(right && f>0f) .5f else 0f)) {
                     CornerBubble(
-                        modifier=Modifier.align(if(right) Alignment.TopEnd else Alignment.TopStart),
+                        modifier=Modifier.absoluteOffset {
+                            val x=if(right) end-panelWidth else leftAnchor.floatValue
+                            IntOffset(x.dp.roundToPx(),(if(right) y else topAnchor.floatValue).dp.roundToPx())
+                        }.wrapContentSize(Alignment.TopStart,unbounded=true).requiredWidth(panelWidth.dp)
+                            .heightIn(max=(viewport.height-viewport.bottom-(if(right) y else topAnchor.floatValue)-10f).coerceAtLeast(50f).dp)
+                            .graphicsLayer {
+                                if(hiddenAccount) { alpha=1f-f; scaleX=1f-.12f*f; scaleY=scaleX }
+                            },
                         motion=if(right) settingsMotion else accountMotion,frame=frame,
-                        active=owner==name,right=right,frost=frost,dark=dark,
+                        active=owner==name,right=right,frost=frost,dark=dark, dockEnabled=!inputHidden,
+                        dockWidth=(if(right) buttonSize else CORNER_BUTTON_DIAMETER).dp,
+                        dockHeight=(if(right) buttonSize else CORNER_BUTTON_DIAMETER).dp,
+                        dockGlyphSize=if(right) 21.dp else null,
+                        dockGlassAlpha=if(right) 1f+(LandscapeCardGlassAlpha-1f)*f else 1f,
+                        dockFrost=if(right && f>0f) navigation.cardFrost else null,
+                        dockFrostWeight=if(right) f else 0f,
                         dockMotion=if(right) null else dockMotion, backTurn=if(right) null else turn,
-                        backEnabled=!right&&navigation.expanded&&owner==null,
+                        backEnabled=!right&&!inputHidden&&navigation.expanded&&owner==null,
                         onBackPressed={backPressed=it},onBack=navigation::back,
                         avatar=if(right) null else avatar,
                         label=if(right) "设置" else "用户账户",
                         title=if(right) "设置" else "账户",
                         onPressed={if(right) settingsPressed=it else accountPressed=it},
                         onGeometryChanged={Snapshot.withoutReadObservation {layoutSignal++}},
-                        onClick={requested=if(requested==name) null else name},
+                        onClick={if(!inputHidden) requested=if(requested==name) null else name},
                     ) {
                         if(right) SettingsContents(bridge,dark,requested==owner)
                         else AccountContents(bridge,session,dark,avatar,requested==owner)

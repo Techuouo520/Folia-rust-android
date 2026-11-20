@@ -27,6 +27,7 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
     companion object {
         const val TILE = 64
         const val SIZE = 768
+        val MIPMAPS = DailySpatialMipmaps(SIZE)
         const val PREVIEWS = 2048
         const val INITIAL_PREVIEWS = 1024
         const val ATLAS_SIDE = 32
@@ -40,7 +41,6 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
             allowCoreThreadTimeOut(true)
         }
         fun trimShared() { sharedPreviews.evictAll() }
-        private const val FULL_BYTES = SIZE * SIZE * 4
         private const val STAGING_BYTES = 48 * 1024 * 1024
     }
     class Preview(val bitmap: Bitmap, val color: Int)
@@ -54,7 +54,7 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
     private val palette = ThreadLocal.withInitial { IntArray(TILE * TILE) }
     private val thumbnailCache = CoverThumbnailCache(context)
     private val previewKeys = LruCache<String, String>(PREVIEWS)
-    private val pixels = DailySpatialPixels(SIZE, STAGING_BYTES)
+    private val pixels = DailySpatialPixels(MIPMAPS.bytes, STAGING_BYTES)
     private val pending = mutableSetOf<String>()
     private val pendingFull = mutableSetOf<String>()
     private val failed = mutableMapOf<String, Long>()
@@ -110,7 +110,7 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
             // Recheck publication under the admission lock: GL may already borrow it.
             if (closed || (high && !highActive) || (if (high) pixels.ready(url) != null else preview(url) != null)) return
             if (url in work || unavailable(url)) return
-            if (high && (pixels.readyCount() + pendingFull.size + 1) * FULL_BYTES > STAGING_BYTES) return
+            if (high && (pixels.readyCount() + pendingFull.size + 1) * MIPMAPS.bytes > STAGING_BYTES) return
             if (high && pixels.promote(url)) { changed(); return }
             if (pending.size + pendingFull.size >= 12) return
             work.add(url)
@@ -145,7 +145,7 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
                     } else {
                         previewKeys.put(url, version)
                     }
-                    image.copyPixelsToBuffer(buffer)
+                    writeMipmaps(image, buffer)
                     buffer.flip()
                 } finally { image.recycle() }
                 synchronized(pending) {
@@ -162,6 +162,25 @@ internal class DailySpatialCovers(context: Context, private val source: (String)
                 // Failed jobs also invalidate demand so the renderer can leave warm-up.
                 changed()
             }
+        }
+    }
+
+    private fun writeMipmaps(image: Bitmap, buffer: ByteBuffer) {
+        // Build once on the decode worker. Never regenerate the entire texture array
+        // on GL, or resize textures while a pinch is being drawn.
+        var previous = image
+        try {
+            for (level in MIPMAPS.levels) {
+                if (previous.width != level.side) {
+                    val next = Bitmap.createScaledBitmap(previous, level.side, level.side, true)
+                    if (previous !== image) previous.recycle()
+                    previous = next
+                }
+                buffer.position(level.offset)
+                previous.copyPixelsToBuffer(buffer)
+            }
+        } finally {
+            if (previous !== image) previous.recycle()
         }
     }
 

@@ -48,7 +48,8 @@ internal fun CornerBubble(
     frost: FrostBackdrop?, dark: Boolean, avatar: ImageBitmap?, label: String, title: String?,
     artworkPlaceholder: (@Composable () -> Unit)? = null,
     dockWidth: Dp = CORNER_BUTTON_DIAMETER.dp, dockHeight: Dp = CORNER_BUTTON_DIAMETER.dp,
-    attachedToPlayer: Boolean = false, dockMotion: CornerMotion? = null, backTurn: FloatArray? = null, backEnabled: Boolean = false,
+    dockGlassAlpha: Float = 1f, dockFrost: FrostBackdrop? = null, dockFrostWeight: Float = 0f,
+    dockGlyphSize: Dp? = null, dockEnabled: Boolean = true, liveHeight: Boolean = false, attachedToPlayer: Boolean = false, dockMotion: CornerMotion? = null, backTurn: FloatArray? = null, backEnabled: Boolean = false,
     onBackPressed: (Boolean)->Unit = {}, onBack: ()->Unit = {},
     onPressed: (Boolean)->Unit, onGeometryChanged: ()->Unit, onClick: ()->Unit, content: @Composable ()->Unit,
 ) {
@@ -80,7 +81,7 @@ internal fun CornerBubble(
         val body=if(active) subcompose("body") {
             if (title == null) content() else PinnedBubbleContents(title,dark,motion,frame,scroll,content)
         }.single().measure(Constraints(minWidth=width,maxWidth=width,maxHeight=viewport)) else null
-        if(motion.bounds(width/density,body?.height?.div(density),right)) onGeometryChanged()
+        if(motion.bounds(width/density,body?.height?.div(density),right,liveHeight)) onGeometryChanged()
         val r=motion.rect();val radius=motion.radius()
         // At rest an opaque sleeve covers every pixel of the MusicBar dock.
         val covered = !active && avatar?.hasAlpha == false && motion.pressScaleX == 1f && motion.pressScaleY == 1f &&
@@ -93,15 +94,24 @@ internal fun CornerBubble(
             TurningDock(radius.dp, dx*carry*density, dy*carry*density, backTurn!![4])
             else RoundedCornerShape(radius.dp)
         val glass=subcompose("glass") {
-            Box(Modifier.clip(dockShape).then(if (covered) Modifier else if (frost != null) Modifier.frostedBackdrop(frost,dark)
-                else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh))
-                .then(if(active) Modifier.pointerInput(Unit){detectTapGestures{}} else Modifier))
+            val base=if(covered) Modifier else if(frost!=null) Modifier.frostedBackdrop(frost,dark)
+                else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            // Opacity belongs to the glass only; the foreground glyph stays crisp.
+            Box(Modifier.graphicsLayer { alpha=1f+(dockGlassAlpha-1f)*(1f-motion.progress) }.clip(dockShape)
+                .then(if(active) Modifier.pointerInput(Unit){detectTapGestures{}} else Modifier)) {
+                if(dockFrost==null) Box(Modifier.matchParentSize().then(base))
+                else {
+                    val share=dockFrostWeight*(1f-motion.progress)
+                    Box(Modifier.matchParentSize().graphicsLayer { alpha=1f-share }.then(base))
+                    Box(Modifier.matchParentSize().graphicsLayer { alpha=share }.frostedBackdrop(dockFrost,dark))
+                }
+            }
         }.single().measure(Constraints.fixed(max(1,(r.width*density).roundToInt()),max(1,(r.height*density).roundToInt())))
         val fade=motion.iconAlpha()
         val icon=subcompose("icon") {
             val ink=MaterialTheme.colorScheme.onSurface
-            val glyphFraction=21f/CORNER_BUTTON_DIAMETER // 19dp → 21dp; retain press scaling.
-            Box(Modifier.fillMaxSize().cornerAction(label,fade>.01f,onPressed,onClick, movingOrigin = motion.flight != null),contentAlignment=androidx.compose.ui.Alignment.Center) {
+            val glyphFraction=dockGlyphSize?.let { it.value/dockWidth.value } ?: (21f/CORNER_BUTTON_DIAMETER) // 19dp → 21dp; retain press scaling.
+            Box(Modifier.fillMaxSize().cornerAction(label,dockEnabled && fade>.01f,onPressed,onClick, movingOrigin = motion.flight != null),contentAlignment=androidx.compose.ui.Alignment.Center) {
                 if(avatar!=null) Image(avatar,null,Modifier.fillMaxSize().clip(CircleShape),contentScale=ContentScale.Crop)
                 else if(artworkPlaceholder != null) artworkPlaceholder()
                 else if(right) Image(painterResource(R.drawable.salam_settings),null,Modifier.fillMaxSize(glyphFraction),colorFilter=ColorFilter.tint(ink))

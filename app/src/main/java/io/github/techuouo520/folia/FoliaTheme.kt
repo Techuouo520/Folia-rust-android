@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 internal val LocalFoliaDark=staticCompositionLocalOf {false}
+internal val LocalArtworkClusters = staticCompositionLocalOf<IntArray?> { null }
 internal val SkyBlue=Color(0xFF87CEEB)
 private data class ArtworkPalette(val accent: Int,val clusters: IntArray?=null)
 /** No wallpaper/system dynamic colours: one artwork seed owns every semantic colour role. */
@@ -69,7 +70,8 @@ internal fun FoliaTheme(bridge: FoliaBridge,dark: Boolean,playback: PlaybackSnap
         clock.snapTo(0f)
         clock.animateTo(1f,tween(420)) {shown=blendScheme(from,target,value);playerShown=playerFrom.blend(playerTarget,value)}
     }
-    CompositionLocalProvider(LocalFoliaDark provides dark,LocalPlayerPalette provides playerShown) {
+    CompositionLocalProvider(LocalFoliaDark provides dark,LocalPlayerPalette provides playerShown,
+        LocalArtworkClusters provides seed.clusters.takeIf { seedOwner == identity }) {
         MaterialTheme(colorScheme=shown,content=content)
     }
 }

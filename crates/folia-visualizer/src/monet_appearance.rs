@@ -166,6 +166,8 @@ pub struct MonetAppearance {
     pub shell_capsule: bool,
     /// Android mounts its native ticker in the computed rail rectangle.
     pub native_ticker: bool,
+    /// Android safe drawing insets in stage dp.
+    pub mobile_insets: [f32; 4],
     pub typography: Typography,
     pub word_colors: Vec<WordColor>,
     pub lyrics_icons: Vec<String>,

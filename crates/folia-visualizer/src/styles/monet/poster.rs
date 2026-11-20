@@ -61,6 +61,7 @@ struct RasterKey {
 
 #[derive(PartialEq)]
 struct TitleKey {
+    rows: usize,
     ink: RasterKey,
     shadow: [u8; 4],
 }
@@ -187,6 +188,7 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
     let title_ink = color(theme.primary, 1.0);
     let title_shadow = color(theme.background, 1.0);
     let title_key = TitleKey {
+        rows: layout.title_rows,
         ink: RasterKey {
             text: title.to_owned(), px: layout.title_px.to_bits(), height: line_height.to_bits(),
             width: layout.header_width.to_bits(), density: density.to_bits(), font: title_font,
@@ -197,8 +199,10 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
     // Prepare both passes before their first visible intro frame. Only the current two
     // title rows are retained; moving and fading them never changes these raster keys.
     if cache.title.as_ref().is_none_or(|(key, _)| key != &title_key) {
-        let rows = title_rows(title, layout.title_px, layout.header_width, title_font)
-            .into_iter()
+        let labels = if layout.title_rows == 1 {
+            vec![truncate(title, layout.title_px, title_font, layout.header_width)]
+        } else { title_rows(title, layout.title_px, layout.header_width, title_font) };
+        let rows = labels.into_iter()
             .map(|text| TitleRow {
                 ink: text::raster(&text, layout.title_px, line_height, title_font, title_ink, density),
                 shadow: text::raster(&text, layout.title_px, line_height, title_font, title_shadow, density),
@@ -251,7 +255,7 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
         }
     }
     let rule_p = intro(time, 0.5, 1.5);
-    if rule_p > 0.0 {
+    if rule_p > 0.0 && layout.rule.height > 0.0 {
         let rule = layout.rule;
         let length = rule.height * rule_p;
         let fill = gradient::Linear::new(rule.position(), Point::new(rule.x, rule.y + length))
@@ -291,6 +295,7 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
             ink::masked(frame, place, pen, color(theme.primary, title_p), band, &ink::opaque);
         }
     }
+    if layout.album.height <= 0.0 { return; }
     let original = scene.album.trim();
     let album = match &cache.album {
         Some((name, width, shown)) if name == original && *width == layout.header_width => shown,

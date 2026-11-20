@@ -78,6 +78,9 @@ pub fn layout(scene: &Scene<'_>, size: Size, offset: f32) -> Layout {
     let square = values.choice(manifest, "portraitStyle") == "square";
     let saved = tuning::offset(values);
     let (w, h) = (size.width, size.height);
+    if scene.monet.native_ticker && w > h {
+        return mobile_landscape(scene, size, font_scale);
+    }
     let large = large_screen(w);
     let lyric_px = clamp_font(1.34, 2.75, 2.28, w, font_scale * large);
     let inactive_px = clamp_font(1.08, 2.0, 1.48, w, font_scale * large);
@@ -213,4 +216,22 @@ pub fn capsule_label(scene: &Scene<'_>) -> String {
     let name =
         scene.monet.description.as_deref().filter(|text| !text.trim().is_empty()).unwrap_or(&scene.theme.name).trim();
     if name.is_empty() { "MONET".to_owned() } else { name.to_uppercase() }
+}
+
+fn mobile_landscape(scene: &Scene<'_>, size: Size, font_scale: f32) -> Layout {
+    let p = crate::mobile_layout::landscape(size.width, size.height, scene.monet.mobile_insets, font_scale);
+    let [x,y,w,h] = p.rail;
+    let artist_px = (p.main_px * 0.7).clamp(12.,16.);
+    let title_px = (p.main_px * 1.05).clamp(16.,22.);
+    let artist = Rectangle { x, y: scene.monet.mobile_insets[1]+58., width: w, height: artist_px*1.2 };
+    let title = Rectangle { x, y: artist.y+artist.height+3., width: w, height: title_px*1.06 };
+    let empty = Rectangle { x, y, width: 0., height: 0. };
+    Layout { lyric_px: p.main_px, inactive_px: p.main_px, translation_px: p.subtitle_px,
+        artist_px, title_px, glow: 0., header_width: w, artist, rule: empty, title, title_rows: 1,
+        album: empty, heading: Rectangle { x, y: artist.y, width: w, height: y-artist.y },
+        rail: Rectangle { x,y,width:w,height:h }, capsule: None, description: empty,
+        // The shell owns the cover and MusicBar as one continuous glass card in landscape.
+        column: None, wrapper: None, portrait: None, hanger: None,
+        audio: Rectangle { x, y: size.height-scene.monet.mobile_insets[3]-32., width:w, height:32. },
+    }
 }

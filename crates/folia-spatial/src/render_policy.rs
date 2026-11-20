@@ -22,7 +22,12 @@ pub fn loudness_ramp(from:i32,to:i32,elapsed:i64,duration:i64)->i32{
     let t=(elapsed.max(0) as f32/duration as f32).clamp(0.,1.);
     (from as f32+(to as f32-from as f32)*t+0.5).floor() as i32
 }
+/// Viewport orientation, independent of whether the user selected Map or Rhine.
+pub fn screen_edges(w:f32,h:f32)->[f32;3]{
+    if w>h{[0.,h,0.]}else{[(h*0.18).clamp(56.,120.),h-(h*0.23).clamp(72.,152.),1.]}
+}
 pub fn edge_factor(y:f32,h:f32,top:f32,bottom:f32)->f32{
+    if top<=0.&&bottom>=h{return 0.}
     fn smooth(x:f32)->f32{let x=x.clamp(0.,1.);x*x*(3.-2.*x)}
     smooth(1.-y/top.max(1.)).max(smooth((y-bottom)/(h-bottom).max(1.)))
 }
